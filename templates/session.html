@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Attendance & Marks{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Attendance &amp; Marks</h4>
+  <span class="badge bg-primary fs-6">{{ sel_date }}</span>
+</div>
+
+{% if students %}
+
+<div class="card p-3 mb-3 quick-mark-card">
+  <h6 class="mb-2">Mark by Student ID</h6>
+  <div class="row g-2 align-items-end">
+    <div class="col-12">
+      <label class="form-label small mb-1">Student ID</label>
+      <input type="text" id="quickSid" class="form-control form-control-lg" autocomplete="off"
+             autocapitalize="characters" inputmode="text" autofocus placeholder="Type or scan Student ID">
+      <div id="quickNameDisplay" class="mt-1 small"></div>
+    </div>
+    <div class="col-12">
+      <label class="form-label small mb-1">Attendance</label>
+      <div class="btn-group w-100" role="group">
+        <input type="radio" class="btn-check" name="quickAtt" id="quickP" value="P" checked>
+        <label class="btn btn-outline-success btn-lg" for="quickP">Present</label>
+        <input type="radio" class="btn-check" name="quickAtt" id="quickA" value="A">
+        <label class="btn btn-outline-danger btn-lg" for="quickA">Absent</label>
+      </div>
+    </div>
+    <div class="col-12">
+      <label class="form-label small mb-1">Marks</label>
+      <select id="quickMarks" class="form-select form-select-lg">
+        <option value="">—</option>
+        <option value="0">0</option>
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+      </select>
+    </div>
+    <div class="col-12">
+      <button type="button" id="quickSubmit" class="btn btn-primary btn-lg w-100">Mark</button>
+    </div>
+  </div>
+  <div id="quickResult" class="mt-2 small fw-semibold"></div>
+</div>
+
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h6 class="mb-0">{{ sel_date }}</h6>
+    <span class="badge bg-secondary">{{ students|length }} student(s)</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table student-table align-middle mb-0">
+      <thead><tr><th>#</th><th>Student ID</th><th>Name</th><th>Seat No</th><th>Attendance</th><th>Marks</th></tr></thead>
+      <tbody>
+        {% for s in students %}
+        {% set sid = s.StudentID|string %}
+        {% set ex = existing.get(sid) %}
+        {% set locked = ex and is_locked(ex.get('Locked')) %}
+        <tr id="row-{{ sid }}" class="{{ 'table-light text-muted' if locked else '' }}">
+          <td>{{ loop.index }}</td>
+          <td>{{ s.StudentID }}</td>
+          <td>{{ s.StudentName }}</td>
+          <td>{{ s["Seat No"] }}</td>
+          <td id="att-{{ sid }}">
+            {% if locked %}
+              <span class="badge bg-secondary">🔒 {{ ex.Attendance }}</span>
+            {% else %}
+              <span class="text-muted">Not marked yet</span>
+            {% endif %}
+          </td>
+          <td id="marks-{{ sid }}">
+            {% if locked %}
+              🔒 {{ ex.Marks }}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="text-muted small mt-2 mb-0">This list is for reference only — use "Mark by Student ID" above to record attendance and marks. It updates automatically as students are marked.</p>
+</div>
+
+<script>
+(function () {
+  const sidInput = document.getElementById('quickSid');
+  const marksInput = document.getElementById('quickMarks');
+  const resultDiv = document.getElementById('quickResult');
+  const nameDisplay = document.getElementById('quickNameDisplay');
+  const submitBtn = document.getElementById('quickSubmit');
+  const selDate = {{ sel_date|tojson }};
+  const markUrl = {{ url_for('session_mark')|tojson }};
+  const studentInfo = {{ student_info|tojson }};
+
+  function getAttendance() {
+    const checked = document.querySelector('input[name="quickAtt"]:checked');
+    return checked ? checked.value : 'P';
+  }
+
+  function showResult(msg, ok) {
+    resultDiv.textContent = msg;
+    resultDiv.className = 'mt-2 small fw-semibold ' + (ok ? 'text-success' : 'text-danger');
+  }
+
+  function updateNameDisplay() {
+    const sid = sidInput.value.trim();
+    if (!sid) { nameDisplay.textContent = ''; return; }
+    const info = studentInfo[sid];
+    if (info) {
+      const seatPart = info.seatNo ? (' &middot; Seat ' + info.seatNo) : '';
+      nameDisplay.innerHTML = '👤 <span class="text-success fw-semibold">' + info.name + '</span>' + seatPart;
+    } else {
+      nameDisplay.innerHTML = '<span class="text-danger">No student with that ID assigned to you</span>';
+    }
+  }
+
+  function updateRowInTable(sid, attendance, marks) {
+    const row = document.getElementById('row-' + sid);
+    if (!row) return; // student may not be visible in this TA's table if IDs mismatch somehow
+    row.classList.add('table-light', 'text-muted');
+    const attCell = document.getElementById('att-' + sid);
+    const marksCell = document.getElementById('marks-' + sid);
+    if (attCell) attCell.innerHTML = '<span class="badge bg-secondary">🔒 ' + attendance + '</span>';
+    if (marksCell) marksCell.textContent = marks ? ('🔒 ' + marks) : '🔒';
+  }
+
+  async function submitQuickMark() {
+    const sid = sidInput.value.trim();
+    if (!sid) { showResult('Enter a student ID first.', false); sidInput.focus(); return; }
+
+    submitBtn.disabled = true;
+    try {
+      const resp = await fetch(markUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          date: selDate,
+          student_id: sid,
+          attendance: getAttendance(),
+          marks: marksInput.value.trim()
+        })
+      });
+      const data = await resp.json();
+
+      if (data.ok) {
+        const label = data.attendance === 'P' ? 'Present' : 'Absent';
+        showResult('✅ ' + data.name + ' — ' + label + (data.marks ? (', Marks: ' + data.marks) : '') + '.', true);
+        updateRowInTable(sid, data.attendance, data.marks);
+        if (navigator.vibrate) navigator.vibrate(40);
+        sidInput.value = '';
+        marksInput.value = '';
+        nameDisplay.textContent = '';
+        document.getElementById('quickP').checked = true;
+        sidInput.focus();
+      } else {
+        showResult('❌ ' + data.error, false);
+        if (data.name) updateRowInTable(sid, data.attendance, data.marks);
+        if (navigator.vibrate) navigator.vibrate([30, 60, 30]);
+        sidInput.select();
+      }
+    } catch (err) {
+      showResult('❌ Network error — check your connection and try again.', false);
+    } finally {
+      submitBtn.disabled = false;
+    }
+  }
+
+  sidInput.addEventListener('input', updateNameDisplay);
+  submitBtn.addEventListener('click', submitQuickMark);
+  sidInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); submitQuickMark(); }
+  });
+  marksInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); submitQuickMark(); }
+  });
+})();
+</script>
+
+{% elif not students %}
+<p class="text-muted">No students assigned to you.</p>
+{% endif %}
+{% endblock %}

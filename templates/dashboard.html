@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}My Students{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4>Welcome, {{ ta_name }}</h4>
+  <span class="badge bg-secondary">{{ students|length }} student(s)</span>
+</div>
+
+<div class="row mb-4 g-3">
+  <div class="col-6 col-md-3">
+    <a href="{{ url_for('session_form') }}" class="card text-decoration-none p-3 text-center h-100">
+      <div class="fs-3">🧪</div>
+      <div class="fw-semibold">Attendance &amp; Marks</div>
+      <div class="text-muted small">Attendance + Marks</div>
+    </a>
+  </div>
+</div>
+
+<div class="card p-3">
+  <h5 class="mb-3">My Assigned Students</h5>
+  {% if students %}
+  <div class="table-responsive">
+    <table class="table student-table table-striped">
+      <thead><tr><th>#</th><th>Student ID</th><th>Name</th><th>Seat No</th><th>Email</th></tr></thead>
+      <tbody>
+        {% for s in students %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ s.StudentID }}</td>
+          <td>{{ s.StudentName }}</td>
+          <td>{{ s["Seat No"] }}</td>
+          <td>{{ s.StudentEmail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-muted mb-0">No students assigned to you yet, or the sheet is still loading. Contact the admin if this looks wrong.</p>
+  {% endif %}
+</div>
+{% endblock %}
