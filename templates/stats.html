@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Statistics · CSU111 TA Evaluation{% endblock %}
+{% block body %}
+
+<div class="topbar">
+  <div class="brand">TA Evaluation <span class="course-code">CSU111</span></div>
+  <div class="session">
+    <a class="logout" href="/logout">Log out</a>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="eyebrow">Overview</div>
+    <h1><span class="gradient-text">Statistics</span></h1>
+    <p>A quick snapshot of grading progress.</p>
+  </div>
+
+  <div class="card">
+    <div class="section-label">📊 Statistics</div>
+    <div class="stat-grid">
+      <div class="stat-tile c-total">
+        <span class="num">{{ total }}</span>
+        <span class="label">Students graded</span>
+      </div>
+      <div class="stat-tile c-graded">
+        <span class="num">{{ avg }}</span>
+        <span class="label">Average marks</span>
+      </div>
+      <div class="stat-tile c-ta">
+        <span class="num">{{ highest }}</span>
+        <span class="label">Highest marks</span>
+      </div>
+      <div class="stat-tile c-instr">
+        <span class="num">{{ lowest }}</span>
+        <span class="label">Lowest marks</span>
+      </div>
+    </div>
+    <a class="back-link" href="/dashboard">← Back to dashboard</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Attendance · CSU111 TA Evaluation{% endblock %}
+{% block body %}
+
+<div class="topbar">
+  <div class="brand">TA Evaluation <span class="course-code">CSU111</span></div>
+  <div class="session">
+    <a class="logout" href="/logout">Log out</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow">Instructor tools</div>
+    <h1><span class="gradient-text">Attendance</span></h1>
+    <p>Check off every TA who's present today.</p>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category if category in ['success','error','warning'] else 'message' }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <div class="card">
+    <div class="section-label">✅ Today's roll call — {{ today }}</div>
+    <form method="POST">
+      <ul class="roll-list">
+        {% for ta in tas %}
+        <li class="roll-row">
+          <label>
+            <input type="checkbox"
+                   name="ta_names"
+                   value="{{ ta.TA_Name }}"
+                   {% if ta_attendance.get(ta.TA_Name, "Absent") == "Present" %}checked{% endif %}>
+            {{ ta.TA_Name }}
+            <span class="status-tag">
+              {% if ta_attendance.get(ta.TA_Name, "Absent") == "Present" %}
+                Present
+              {% else %}
+                Absent
+              {% endif %}
+            </span>
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+      <button type="submit">Save attendance</button>
+    </form>
+    <a class="back-link" href="/dashboard">← Back to dashboard</a>
+  </div>
+
+</div>
+{% endblock %}
