@@ -291,10 +291,14 @@ def dashboard():
                     url_for_dashboard(student_id[-4:])
                 )
 
-            # Validate numeric marks.
+            # Validate and convert marks to a real number.
+            # This is important because Google Sheets pivots will treat
+            # text values as COUNTA/1 instead of numeric marks.
             try:
-                float(new_marks)
-            except ValueError:
+                marks_number = float(new_marks)
+                if marks_number.is_integer():
+                    marks_number = int(marks_number)
+            except (ValueError, TypeError):
                 flash("Marks must be a number.", "error")
                 return redirect(
                     url_for_dashboard(student_id[-4:])
@@ -312,7 +316,8 @@ def dashboard():
                 # Column E = Date
                 marks_ws.update(
                     f"C{row}:E{row}",
-                    [[new_marks, session["user"], today]]
+                    [[marks_number, session["user"], today]],
+                    value_input_option="USER_ENTERED"
                 )
 
                 message = "Marks updated successfully."
@@ -323,7 +328,7 @@ def dashboard():
                     [
                         student_id,
                         matched["Student_Name"],
-                        new_marks,
+                        marks_number,
                         session["user"],
                         today
                     ],
