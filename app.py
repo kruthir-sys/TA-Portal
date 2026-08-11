@@ -4,7 +4,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import os
 import json
-from pathlib import Path
 import threading
 import time
 
@@ -19,53 +18,38 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Render: Google service-account credentials are stored in the
-# GOOGLE_CREDENTIALS_JSON environment variable.
-# Local development: credentials.json may be used as a fallback.
+# ================= GOOGLE CREDENTIALS =================
+# On Render, the complete service-account JSON is stored in
+# GOOGLE_CREDENTIALS_JSON.
 google_credentials_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-if google_credentials_json:
-    try:
-        credentials_info = json.loads(google_credentials_json)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "GOOGLE_CREDENTIALS_JSON is not valid JSON."
-        ) from exc
+if not google_credentials_json:
+    raise RuntimeError(
+        "GOOGLE_CREDENTIALS_JSON environment variable is missing. "
+        "Add the complete Google service-account JSON in Render."
+    )
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        credentials_info,
-        scope
-    )
-else:
-    # Local development only.
-    if not Path("credentials.json").exists():
-        raise RuntimeError(
-            "GOOGLE_CREDENTIALS_JSON is not configured on Render, "
-            "and credentials.json was not found locally."
-        )
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "credentials.json",
-        scope
-    )
+try:
+    credentials_info = json.loads(google_credentials_json)
+except json.JSONDecodeError as exc:
+    raise RuntimeError(
+        "GOOGLE_CREDENTIALS_JSON is not valid JSON."
+    ) from exc
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(
+    credentials_info,
+    scope
+)
 
 client = gspread.authorize(creds)
 
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 
-if GOOGLE_SHEET_ID:
-
-else:
-    # Local development fallback.
-
-SHEET_NAME = os.environ.get(
-    "GOOGLE_SHEET_NAME",
-    "TA Evaluation Sheet CSU111"
-)
-
-GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-if GOOGLE_SHEET_ID:
-
-else:
+if not GOOGLE_SHEET_ID:
+    raise RuntimeError(
+        "GOOGLE_SHEET_ID environment variable is missing. "
+        "Add it in Render."
+    )
 
 # One process + threads is recommended for this Google Sheets-backed app.
 # It lets the in-process lock protect simultaneous grading submissions.
@@ -160,11 +144,7 @@ def find_student(students, search_value):
     return None
 
 
-GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-if GOOGLE_SHEET_ID:
-    sheet = client.open_by_key(GOOGLE_SHEET_ID)
-else:
-    sheet = client.open("TA Evaluation Sheet CSU111")
+sheet = client.open_by_key(GOOGLE_SHEET_ID)
 
 students_ws = sheet.worksheet("Students")
 marks_ws = sheet.worksheet("Marks")
