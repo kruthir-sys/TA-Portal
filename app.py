@@ -4,32 +4,58 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import os
 import json
+from pathlib import Path
 import threading
 import time
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-locally")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+TA_PASSWORD = os.environ.get("TA_PASSWORD", "ta123")
+INSTRUCTOR_PASSWORD = os.environ.get("INSTRUCTOR_PASSWORD", "instr123")
 
 # ================= GOOGLE SHEETS SETUP =================
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
 
-# Render: store the complete service-account JSON in GOOGLE_CREDENTIALS.
-# Local development: credentials.json can still be used.
-credentials_json = os.environ.get("GOOGLE_CREDENTIALS")
+# Render: Google service-account credentials are stored in the
+# GOOGLE_CREDENTIALS_JSON environment variable.
+# Local development: credentials.json may be used as a fallback.
+google_credentials_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-if credentials_json:
+if google_credentials_json:
+    try:
+        credentials_info = json.loads(google_credentials_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GOOGLE_CREDENTIALS_JSON is not valid JSON."
+        ) from exc
+
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        json.loads(credentials_json),
+        credentials_info,
         scope
     )
 else:
+    # Local development only.
+    if not Path("credentials.json").exists():
+        raise RuntimeError(
+            "GOOGLE_CREDENTIALS_JSON is not configured on Render, "
+            "and credentials.json was not found locally."
+        )
     creds = ServiceAccountCredentials.from_json_keyfile_name(
         "credentials.json",
         scope
     )
 
 client = gspread.authorize(creds)
+
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+
+if GOOGLE_SHEET_ID:
+
+else:
+    # Local development fallback.
 
 SHEET_NAME = os.environ.get(
     "GOOGLE_SHEET_NAME",
@@ -38,9 +64,8 @@ SHEET_NAME = os.environ.get(
 
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 if GOOGLE_SHEET_ID:
-    sheet = client.open_by_key(GOOGLE_SHEET_ID)
+
 else:
-    sheet = client.open("TA Evaluation Sheet CSU111")
 
 # One process + threads is recommended for this Google Sheets-backed app.
 # It lets the in-process lock protect simultaneous grading submissions.
@@ -134,6 +159,12 @@ def find_student(students, search_value):
 
     return None
 
+
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+if GOOGLE_SHEET_ID:
+    sheet = client.open_by_key(GOOGLE_SHEET_ID)
+else:
+    sheet = client.open("TA Evaluation Sheet CSU111")
 
 students_ws = sheet.worksheet("Students")
 marks_ws = sheet.worksheet("Marks")
