@@ -1,331 +1,485 @@
-import os
-import re
-import json
-from datetime import datetime, date
-from functools import wraps
-
-from dotenv import load_dotenv
-load_dotenv()  # reads a .env file in this folder, if present, into os.environ
-
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask import Flask, render_template, request, redirect, session, flash
 import gspread
-from gspread.exceptions import WorksheetNotFound
-from google.oauth2.service_account import Credentials
-
-SESSION_HEADERS = ["StudentID", "StudentName", "Date", "Allocated TA", "Attendance", "Marks", "LastUpdated", "Locked"]
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+import os
+import json
+import threading
+import time
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-locally")
 
-# Simple in-process cache so we don't hit the Sheets API on every click.
-_cache = {"client": None, "sheet": None}
+# ================= GOOGLE SHEETS SETUP =================
+scope = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+
+# Render: store the complete service-account JSON in GOOGLE_CREDENTIALS.
+# Local development: credentials.json can still be used.
+credentials_json = os.environ.get("GOOGLE_CREDENTIALS")
+
+if credentials_json:
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        json.loads(credentials_json),
+        scope
+    )
+else:
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        "credentials.json",
+        scope
+    )
+
+client = gspread.authorize(creds)
+
+SHEET_NAME = os.environ.get(
+    "GOOGLE_SHEET_NAME",
+    "TA Evaluation Sheet CSU111"
+)
+
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+if GOOGLE_SHEET_ID:
+    sheet = client.open_by_key(GOOGLE_SHEET_ID)
+else:
+    sheet = client.open("TA Evaluation Sheet CSU111")
+
+# One process + threads is recommended for this Google Sheets-backed app.
+# It lets the in-process lock protect simultaneous grading submissions.
+write_lock = threading.Lock()
+
+# Short-lived caches reduce repeated full-sheet reads while keeping marks
+# responsive. Marks cache is invalidated immediately after writes.
+_cache_lock = threading.Lock()
+_students_cache = {"data": None, "expires": 0}
+_tas_cache = {"data": None, "expires": 0}
+_instructors_cache = {"data": None, "expires": 0}
+_marks_cache = {"data": None, "expires": 0}
+
+STUDENTS_CACHE_SECONDS = 300
+TA_CACHE_SECONDS = 30
+INSTRUCTOR_CACHE_SECONDS = 30
+MARKS_CACHE_SECONDS = 3
 
 
-def get_client():
-    if _cache["client"]:
-        return _cache["client"]
-    creds_dict = _load_credentials_dict()
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    _cache["client"] = gspread.authorize(creds)
-    return _cache["client"]
+def cached_records(ws, cache, ttl):
+    now = time.time()
+
+    with _cache_lock:
+        if cache["data"] is not None and now < cache["expires"]:
+            return cache["data"]
+
+    data = ws.get_all_records()
+
+    with _cache_lock:
+        cache["data"] = data
+        cache["expires"] = now + ttl
+
+    return data
 
 
-def _load_credentials_dict():
-    """
-    Supports two ways of providing the service-account credentials:
-    - GOOGLE_CREDENTIALS_FILE: path to the downloaded .json key file (handy locally / in .env)
-    - GOOGLE_CREDENTIALS_JSON: the full JSON contents as a string (handy on Render, where
-      there's no file to point to - paste the whole file's contents as the env var value)
-    """
-    creds_file = os.environ.get("GOOGLE_CREDENTIALS_FILE")
-    if creds_file:
-        with open(creds_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        return json.loads(creds_json)
-    raise RuntimeError(
-        "Set either GOOGLE_CREDENTIALS_FILE (path to your service-account .json) "
-        "or GOOGLE_CREDENTIALS_JSON (its full contents) as an env var."
+def invalidate_marks_cache():
+    with _cache_lock:
+        _marks_cache["data"] = None
+        _marks_cache["expires"] = 0
+
+
+def get_students():
+    return cached_records(
+        students_ws,
+        _students_cache,
+        STUDENTS_CACHE_SECONDS
     )
 
 
-def get_sheet():
-    if _cache["sheet"]:
-        return _cache["sheet"]
-    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        raise RuntimeError("GOOGLE_SHEET_ID env var not set")
-    client = get_client()
-    _cache["sheet"] = client.open_by_key(sheet_id)
-    return _cache["sheet"]
+def get_tas():
+    return cached_records(
+        ta_ws,
+        _tas_cache,
+        TA_CACHE_SECONDS
+    )
 
 
-def get_worksheet(name):
-    return get_sheet().worksheet(name)
+def get_instructors():
+    return cached_records(
+        instructor_ws,
+        _instructors_cache,
+        INSTRUCTOR_CACHE_SECONDS
+    )
 
 
-def login_required(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if not session.get("ta_email"):
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return wrapper
+def get_marks():
+    return cached_records(
+        marks_ws,
+        _marks_cache,
+        MARKS_CACHE_SECONDS
+    )
 
 
-def get_my_students(ta_email):
-    ws = get_worksheet("Students")
-    records = ws.get_all_records()
-    return [r for r in records if str(r.get("TA_Email", "")).strip().lower() == ta_email]
+def normalize_student_id(value):
+    value = str(value or "").strip().upper()
+    # Ignore only the final G in IDs such as 2026A7PS0702G.
+    return value[:-1] if value.endswith("G") else value
 
 
-def get_all_students():
-    """Full roster from the Students tab, in the exact order it appears there."""
-    ws = get_worksheet("Students")
-    return ws.get_all_records()
+def find_student(students, search_value):
+    search_value = normalize_student_id(search_value)
+
+    for student in students:
+        sid = normalize_student_id(student.get("Student_ID", ""))
+
+        if sid == search_value:
+            return student
+
+        if len(search_value) == 4 and sid.endswith(search_value):
+            return student
+
+    return None
 
 
-def get_ta_name_map():
-    """Maps TA email (lowercased) -> TA_Name, for labelling the roster nicely."""
-    try:
-        ws = get_worksheet("TAs")
-        records = ws.get_all_records()
-        return {str(r.get("Email", "")).strip().lower(): r.get("TA_Name", "") for r in records}
-    except Exception:
-        return {}
+students_ws = sheet.worksheet("Students")
+marks_ws = sheet.worksheet("Marks")
+ta_ws = sheet.worksheet("TA_List")
+instructor_ws = sheet.worksheet("Instructors")
+ta_attendance_ws = sheet.worksheet("TA_Attendance")
 
 
-ALLOWED_MARKS = {"", "0", "1", "2", "3"}
+@app.route("/health")
+def health():
+    return "OK", 200
 
-
-def is_locked(value):
-    return str(value or "").strip().lower() in ("yes", "true", "y", "1")
-
-
-app.jinja_env.globals["is_locked"] = is_locked
-
-
-def sanitize_title(name):
-    # Google Sheets tab titles can't contain [ ] * ? : / \ and have a length limit.
-    name = re.sub(r"[\[\]\*\?:/\\]", "", name).strip()
-    name = re.sub(r"\s+", " ", name)
-    return (name or "Session")[:100]
-
-
-def session_sheet_title(date_str):
-    return sanitize_title(f"Lab - {date_str}")
-
-
-def get_or_create_session_ws(date_str):
-    sheet = get_sheet()
-    title = session_sheet_title(date_str)
-    try:
-        ws = sheet.worksheet(title)
-        if ws.row_values(1) != SESSION_HEADERS:
-            ws.update("A1", [SESSION_HEADERS])
-        return ws
-    except WorksheetNotFound:
-        pass
-
-    # First time this date is opened: pre-populate the full roster,
-    # in the same order the students appear in the Students tab.
-    try:
-        all_students = get_all_students()
-    except Exception:
-        all_students = []
-    ta_names = get_ta_name_map()
-
-    roster_rows = []
-    for s in all_students:
-        sid = str(s.get("StudentID", ""))
-        if not sid:
-            continue
-        ta_email = str(s.get("TA_Email", "")).strip().lower()
-        allocated_ta = ta_names.get(ta_email) or s.get("TA_Email", "")
-        roster_rows.append([sid, s.get("StudentName", ""), date_str, allocated_ta, "", "", "", ""])
-
-    ws = sheet.add_worksheet(title=title, rows=max(len(roster_rows) + 20, 100), cols=len(SESSION_HEADERS))
-    ws.update("A1", [SESSION_HEADERS] + roster_rows)
-    return ws
-
-
-def save_session_rows(ws, new_rows):
-    """
-    Update new_rows (list of row-lists keyed by StudentID in column 0) into the
-    worksheet IN PLACE, preserving the existing row order (which matches the
-    Students tab order). Rows for students not in new_rows are left untouched.
-    A StudentID not already present gets appended at the end as a fallback.
-    """
-    existing = ws.get_all_records()
-    rows = [[rec.get(h, "") for h in SESSION_HEADERS] for rec in existing]
-    id_to_index = {str(r[0]): i for i, r in enumerate(rows) if r and r[0] != ""}
-
-    for nr in new_rows:
-        sid = str(nr[0])
-        if sid in id_to_index:
-            rows[id_to_index[sid]] = nr
-        else:
-            rows.append(nr)
-            id_to_index[sid] = len(rows) - 1
-
-    ws.clear()
-    ws.update("A1", [SESSION_HEADERS] + rows)
-
-
-# ---------------- Auth ----------------
-
-@app.route("/")
-def index():
-    if session.get("ta_email"):
-        return redirect(url_for("dashboard"))
-    return redirect(url_for("login"))
-
-
-@app.route("/login", methods=["GET", "POST"])
+# ================= LOGIN =================
+@app.route("/", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        try:
-            ws = get_worksheet("TAs")
-            records = ws.get_all_records()
-        except Exception as e:
-            flash(f"Could not reach Google Sheet: {e}", "error")
-            return redirect(url_for("login"))
+        username = request.form["username"]
+        password = request.form["password"]
 
-        for row in records:
-            row_email = str(row.get("Email", "")).strip().lower()
-            row_password = str(row.get("Password", "")).strip()
-            if row_email == email and row_password == password and email:
-                session["ta_email"] = row_email
-                session["ta_name"] = row.get("TA_Name", email)
-                session["ta_id"] = row.get("TA_ID", "")
-                return redirect(url_for("dashboard"))
+        instructors = get_instructors()
+        tas = get_tas()
 
-        flash("Invalid email or password.", "error")
-        return redirect(url_for("login"))
+        # Instructor login
+        for ins in instructors:
+            if ins["Instructor_Name"] == username and password == INSTRUCTOR_PASSWORD:
+                session["user"] = username
+                session["role"] = "instructor"
+                return redirect("/dashboard")
+
+        # TA login
+        for ta in tas:
+            if ta["TA_Name"] == username and password == TA_PASSWORD:
+                session["user"] = username
+                session["role"] = "ta"
+                return redirect("/dashboard")
+
+        flash("Invalid login", "error")
 
     return render_template("login.html")
 
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
-# ---------------- Dashboard ----------------
-
-@app.route("/dashboard")
-@login_required
+# ================= DASHBOARD =================
+@app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
-    try:
-        students = get_my_students(session["ta_email"])
-    except Exception as e:
-        flash(f"Could not load students: {e}", "error")
-        students = []
-    return render_template("dashboard.html", students=students, ta_name=session.get("ta_name"))
 
+    if "user" not in session:
+        return redirect("/")
 
-# ---------------- Attendance & Marks ----------------
+    role = session["role"]
 
-@app.route("/session", methods=["GET"])
-@login_required
-def session_form():
-    ta_email = session["ta_email"]
-    try:
-        students = get_my_students(ta_email)
-    except Exception as e:
-        flash(f"Could not load data: {e}", "error")
-        students = []
+    students = get_students()
+    marks = get_marks()
+    tas = get_tas()
 
-    sel_date = date.today().isoformat()  # always today - no picker, TAs mark same-day attendance only
+    # Build a fresh dictionary from the latest marks snapshot.
+    marks_dict = {
+        str(m.get("Student_ID", "")).strip(): m
+        for m in marks
+        if str(m.get("Student_ID", "")).strip()
+    }
 
-    existing = {}
-    if students:
-        try:
-            ws = get_or_create_session_ws(sel_date)
-            for rec in ws.get_all_records():
-                sid = str(rec.get("StudentID", ""))
-                if sid:
-                    existing[sid] = rec
-        except Exception as e:
-            flash(f"Could not load existing session data: {e}", "error")
+    # ===== SEARCH =====
+    search_query = request.args.get("search", "").strip()
+    search_results = []
+
+    if search_query:
+        search_value = normalize_student_id(search_query)
+
+        for student in students:
+            sid = normalize_student_id(student.get("Student_ID", ""))
+
+            if sid == search_value or (
+                len(search_value) == 4 and sid.endswith(search_value)
+            ):
+                student_view = dict(student)
+
+                existing = marks_dict.get(
+                    str(student.get("Student_ID", "")).strip()
+                )
+
+                student_view["graded"] = existing is not None
+                student_view["existing_marks"] = (
+                    existing.get("Marks", "") if existing else ""
+                )
+                student_view["graded_by"] = (
+                    existing.get("TA", "") if existing else ""
+                )
+                student_view["graded_date"] = (
+                    existing.get("Date", "") if existing else ""
+                )
+
+                search_results.append(student_view)
+
+    # ===== SUBMIT / UPDATE MARKS =====
+    if request.method == "POST":
+
+        student_id = str(
+            request.form.get("student_id", "")
+        ).strip()
+
+        new_marks = str(
+            request.form.get("marks", "")
+        ).strip()
+
+        if not student_id or new_marks == "":
+            flash("Please enter a student ID and marks.", "error")
+            return redirect(
+                url_for_dashboard(search_query)
+            )
+
+        matched = next(
+            (
+                s for s in students
+                if str(s.get("Student_ID", "")).strip() == student_id
+            ),
+            None
+        )
+
+        if not matched:
+            flash("Student not found.", "error")
+            return redirect("/dashboard")
+
+        # Critical section: re-read Marks immediately before writing.
+        # This prevents two TAs from grading the same student at the same
+        # time based on a stale page.
+        with write_lock:
+
+            latest_marks = marks_ws.get_all_records()
+
+            existing = next(
+                (
+                    m for m in latest_marks
+                    if str(m.get("Student_ID", "")).strip() == student_id
+                ),
+                None
+            )
+
+            if role == "ta" and existing:
+                invalidate_marks_cache()
+                flash(
+                    "This student is already graded. TA marks are locked.",
+                    "warning"
+                )
+                return redirect(
+                    url_for_dashboard(student_id[-4:])
+                )
+
+            # Validate numeric marks.
+            try:
+                float(new_marks)
+            except ValueError:
+                flash("Marks must be a number.", "error")
+                return redirect(
+                    url_for_dashboard(student_id[-4:])
+                )
+
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            if existing:
+
+                cell = marks_ws.find(student_id)
+                row = cell.row
+
+                # Column C = Marks
+                # Column D = TA / Instructor
+                # Column E = Date
+                marks_ws.update(
+                    f"C{row}:E{row}",
+                    [[new_marks, session["user"], today]]
+                )
+
+                message = "Marks updated successfully."
+
+            else:
+
+                marks_ws.append_row(
+                    [
+                        student_id,
+                        matched["Student_Name"],
+                        new_marks,
+                        session["user"],
+                        today
+                    ],
+                    value_input_option="USER_ENTERED"
+                )
+
+                message = "Marks submitted successfully."
+
+            invalidate_marks_cache()
+
+        flash(message, "success")
+
+        return redirect(
+            url_for_dashboard(student_id[-4:])
+        )
+
+    # ===== STATS =====
+    total_students = len(students)
+    graded = len(marks)
+
+    ta_names = [
+        str(t.get("TA_Name", "")).strip()
+        for t in tas
+        if str(t.get("TA_Name", "")).strip()
+    ]
+
+    ta_counts = {ta: 0 for ta in ta_names}
+
+    for mark in marks:
+        grader = str(mark.get("TA", "")).strip()
+
+        if grader in ta_counts:
+            ta_counts[grader] += 1
+
+    graded_by_ta = sum(ta_counts.values())
+
+    graded_by_instructor = sum(
+        1 for mark in marks
+        if str(mark.get("TA", "")).strip() not in ta_counts
+    )
+
+    # Today's TA attendance for instructor dashboard.
+    ta_attendance = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if role == "instructor":
+        attendance_records = ta_attendance_ws.get_all_records()
+
+        ta_attendance = {
+            ta: "Absent"
+            for ta in ta_names
+        }
+
+        for record in attendance_records:
+            ta_name = str(record.get("TA_Name", "")).strip()
+            date = str(record.get("Date", "")).strip()
+            status = str(record.get("Status", "")).strip()
+
+            if date == today and ta_name in ta_attendance:
+                ta_attendance[ta_name] = status or "Absent"
 
     return render_template(
-        "session.html",
-        students=students, sel_date=sel_date,
-        existing=existing, ta_name=session.get("ta_name"),
-        student_info={
-            str(s.get("StudentID")): {
-                "name": s.get("StudentName", ""),
-                "seatNo": s.get("Seat No", ""),
-            }
-            for s in students
-        },
+        "dashboard.html",
+        role=role,
+        search_results=search_results,
+        search_query=search_query,
+        total_students=total_students,
+        graded=graded,
+        graded_by_ta=graded_by_ta,
+        graded_by_instructor=graded_by_instructor,
+        ta_counts=ta_counts,
+        ta_attendance=ta_attendance,
+        today=today
     )
 
 
-@app.route("/session/mark", methods=["POST"])
-@login_required
-def session_mark():
-    """
-    Quick-mark endpoint used by the "type a Student ID" box on the session
-    page. Marks/locks exactly one student and returns JSON so the page can
-    update instantly without a full reload - built for fast phone use.
-    """
-    ta_email = session["ta_email"]
-    ta_name = session.get("ta_name") or ta_email
-    sel_date = date.today().isoformat()  # always today, regardless of what was submitted
-    sid = request.form.get("student_id", "").strip()
-    att = request.form.get("attendance", "P").strip() or "P"
-    marks_val = request.form.get("marks", "").strip()
+def url_for_dashboard(search_value=""):
+    if search_value:
+        from urllib.parse import quote
+        return "/dashboard?search=" + quote(str(search_value))
+    return "/dashboard"
 
-    if not sid:
-        return jsonify(ok=False, error="Enter a Student ID."), 400
-    if marks_val not in ALLOWED_MARKS:
-        return jsonify(ok=False, error="Marks must be 0, 1, 2, or 3."), 400
 
-    try:
-        students = get_my_students(ta_email)
-    except Exception as e:
-        return jsonify(ok=False, error=f"Could not load your students: {e}"), 500
+# ================= ATTENDANCE =================
+@app.route("/attendance", methods=["GET", "POST"])
+def attendance():
 
-    match = next((s for s in students if str(s.get("StudentID")) == sid), None)
-    if not match:
-        return jsonify(ok=False, error=f"Student ID {sid} is not assigned to you."), 404
+    if "role" not in session or session["role"] != "instructor":
+        return redirect("/dashboard")
 
-    try:
-        ws = get_or_create_session_ws(sel_date)
-        existing_records = ws.get_all_records()
-    except Exception as e:
-        return jsonify(ok=False, error=f"Could not open the sheet: {e}"), 500
+    tas = get_tas()
+    ta_names = [
+        str(ta.get("TA_Name", "")).strip()
+        for ta in tas
+        if str(ta.get("TA_Name", "")).strip()
+    ]
 
-    existing_row = next((r for r in existing_records if str(r.get("StudentID")) == sid), None)
-    if existing_row and is_locked(existing_row.get("Locked")):
-        return jsonify(
-            ok=False,
-            error=f"{match.get('StudentName')} is already marked and locked.",
-            name=match.get("StudentName"),
-            attendance=existing_row.get("Attendance"),
-            marks=existing_row.get("Marks"),
-        ), 409
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    now_str = datetime.now().isoformat(timespec="seconds")
-    new_row = [sid, match.get("StudentName"), sel_date, ta_name, att, marks_val, now_str, "Yes"]
+    def load_today_attendance():
+        records = ta_attendance_ws.get_all_records()
 
-    try:
-        save_session_rows(ws, [new_row])
-    except Exception as e:
-        return jsonify(ok=False, error=f"Could not save: {e}"), 500
+        result = {name: "Absent" for name in ta_names}
 
-    return jsonify(ok=True, name=match.get("StudentName"), attendance=att, marks=marks_val)
+        for record in records:
+            name = str(record.get("TA_Name", "")).strip()
+            date = str(record.get("Date", "")).strip()
+            status = str(record.get("Status", "")).strip()
 
+            if date == today and name in result:
+                result[name] = status or "Absent"
+
+        return result
+
+    if request.method == "POST":
+
+        selected = set(request.form.getlist("ta_names"))
+
+        with write_lock:
+
+            records = ta_attendance_ws.get_all_records()
+            existing_rows = {}
+
+            for row_number, record in enumerate(records, start=2):
+                name = str(record.get("TA_Name", "")).strip()
+                date = str(record.get("Date", "")).strip()
+
+                if date == today and name in ta_names:
+                    existing_rows[name] = row_number
+
+            for name in ta_names:
+
+                status = "Present" if name in selected else "Absent"
+
+                if name in existing_rows:
+
+                    row = existing_rows[name]
+
+                    ta_attendance_ws.update(
+                        f"A{row}:C{row}",
+                        [[name, today, status]]
+                    )
+
+                else:
+
+                    ta_attendance_ws.append_row(
+                        [name, today, status],
+                        value_input_option="USER_ENTERED"
+                    )
+
+        flash("TA attendance saved successfully.", "success")
+        return redirect("/dashboard")
+
+    return render_template(
+        "attendance.html",
+        tas=tas,
+        today=today,
+        ta_attendance=load_today_attendance()
+    )
+
+
+# ================= LOGOUT =================
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    # Local development only. Render uses Gunicorn.
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
