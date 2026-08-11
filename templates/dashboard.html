@@ -1,42 +1,165 @@
 {% extends "base.html" %}
-{% block title %}My Students{% endblock %}
-{% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4>Welcome, {{ ta_name }}</h4>
-  <span class="badge bg-secondary">{{ students|length }} student(s)</span>
-</div>
+{% block title %}Dashboard · CSU111 TA Evaluation{% endblock %}
+{% block body %}
 
-<div class="row mb-4 g-3">
-  <div class="col-6 col-md-3">
-    <a href="{{ url_for('session_form') }}" class="card text-decoration-none p-3 text-center h-100">
-      <div class="fs-3">🧪</div>
-      <div class="fw-semibold">Attendance &amp; Marks</div>
-      <div class="text-muted small">Attendance + Marks</div>
-    </a>
+<div class="topbar">
+  <div class="brand">TA Evaluation <span class="course-code">CSU111</span></div>
+  <div class="session">
+    <span class="role-badge role-{{ role }}">{{ role }}</span>
+    <a class="logout" href="/logout">Log out</a>
   </div>
 </div>
 
-<div class="card p-3">
-  <h5 class="mb-3">My Assigned Students</h5>
-  {% if students %}
-  <div class="table-responsive">
-    <table class="table student-table table-striped">
-      <thead><tr><th>#</th><th>Student ID</th><th>Name</th><th>Seat No</th><th>Email</th></tr></thead>
-      <tbody>
-        {% for s in students %}
-        <tr>
-          <td>{{ loop.index }}</td>
-          <td>{{ s.StudentID }}</td>
-          <td>{{ s.StudentName }}</td>
-          <td>{{ s["Seat No"] }}</td>
-          <td>{{ s.StudentEmail }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow">Welcome back</div>
+    <h1><span class="gradient-text">{{ session.user }}</span></h1>
+    <p>You're signed in as {{ role }}. Here's what's happening today.</p>
   </div>
-  {% else %}
-  <p class="text-muted mb-0">No students assigned to you yet, or the sheet is still loading. Contact the admin if this looks wrong.</p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category if category in ['success','error','warning'] else 'message' }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <div class="card">
+    <div class="section-label">🔎 Search student</div>
+    <form method="GET">
+      <label for="search">Last 4 digits of Student ID</label>
+      <input type="text" id="search" name="search" placeholder="e.g. 4821" value="{{ search_query }}" inputmode="numeric">
+      <button type="submit">Search</button>
+    </form>
+
+    {% if search_results %}
+      <p class="result-count">{{ search_results|length }} match{{ "es" if search_results|length != 1 else "" }} found</p>
+
+      {% for s in search_results %}
+      <div style="margin-top:18px;padding:16px;border:1px solid #e5e7eb;border-radius:12px;">
+
+        <div style="font-weight:700;font-size:17px;">
+          {{ s.Student_Name }}
+        </div>
+
+        <div style="margin-top:4px;color:#667085;">
+          Student ID: <strong>{{ s.Student_ID }}</strong>
+        </div>
+
+        {% if s.graded %}
+
+          <div style="margin-top:12px;padding:12px;border-radius:10px;background:#f2fdf5;">
+            <div style="font-weight:700;color:#16803c;">
+              ✓ Already graded
+            </div>
+            <div style="margin-top:7px;">
+              <strong>Marks:</strong> {{ s.existing_marks }}
+            </div>
+            <div style="margin-top:4px;">
+              <strong>Graded by:</strong> {{ s.graded_by }}
+            </div>
+            <div style="margin-top:4px;">
+              <strong>Date:</strong> {{ s.graded_date }}
+            </div>
+          </div>
+
+          {% if role == "instructor" %}
+          <form method="POST" style="margin-top:14px;">
+            <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
+
+            <label for="marks_{{ loop.index }}">Change marks</label>
+            <input type="number"
+                   id="marks_{{ loop.index }}"
+                   name="marks"
+                   value="{{ s.existing_marks }}"
+                   required>
+
+            <button type="submit">Update marks</button>
+          </form>
+          {% else %}
+          <div class="empty-note" style="margin-top:12px;">
+            This student's marks are locked for TA grading.
+          </div>
+          {% endif %}
+
+        {% else %}
+
+          <form method="POST" style="margin-top:14px;">
+            <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
+
+            <label for="marks_{{ loop.index }}">Marks</label>
+            <input type="number"
+                   id="marks_{{ loop.index }}"
+                   name="marks"
+                   placeholder="Enter marks"
+                   required>
+
+            <button type="submit">Save marks</button>
+          </form>
+
+        {% endif %}
+      </div>
+      {% endfor %}
+
+    {% elif search_query %}
+      <p class="empty-note">No student found matching "{{ search_query }}"</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="section-label">📊 Statistics</div>
+    <div class="stat-grid">
+      <div class="stat-tile c-total">
+        <span class="num">{{ total_students }}</span>
+        <span class="label">Total students</span>
+      </div>
+      <div class="stat-tile c-graded">
+        <span class="num">{{ graded }}</span>
+        <span class="label">Graded</span>
+      </div>
+      <div class="stat-tile c-ta">
+        <span class="num">{{ graded_by_ta }}</span>
+        <span class="label">Graded by TAs</span>
+      </div>
+      <div class="stat-tile c-instr">
+        <span class="num">{{ graded_by_instructor }}</span>
+        <span class="label">By instructor</span>
+      </div>
+    </div>
+
+    <div class="section-label">🧑‍🏫 TA breakdown</div>
+    <ul class="ta-ledger">
+      {% for ta, count in ta_counts.items() %}
+      <li><span>{{ ta }}</span><span class="count">{{ count }}</span></li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  {% if role == "instructor" %}
+  <div class="card">
+    <div class="section-label">✅ TA attendance — {{ today }}</div>
+    <ul class="ta-ledger">
+      {% for ta, status in ta_attendance.items() %}
+      <li>
+        <span>{{ ta }}</span>
+        <span class="count">
+          {% if status == "Present" %}
+            <span style="color:#16803c;font-weight:700;">✓ Present</span>
+          {% else %}
+            <span style="color:#b42318;font-weight:700;">✗ Absent</span>
+          {% endif %}
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <div class="link-row">
+    <a href="/attendance">✅ Mark TA attendance</a>
+  </div>
   {% endif %}
+
 </div>
 {% endblock %}
