@@ -1,22 +1,29 @@
 {% extends "base.html" %}
-{% block title %}Login - TA Portal{% endblock %}
-{% block content %}
-<div class="row justify-content-center mt-5">
-  <div class="col-12 col-sm-8 col-md-5 col-lg-4">
-    <div class="card p-4">
-      <h4 class="mb-3 text-center">TA Portal Login</h4>
-      <form method="POST">
-        <div class="mb-3">
-          <label class="form-label">Email</label>
-          <input type="email" name="email" class="form-control" required autofocus placeholder="ta@example.com">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Password</label>
-          <input type="password" name="password" class="form-control" required>
-        </div>
-        <button type="submit" class="btn btn-primary w-100">Log In</button>
-      </form>
-    </div>
+{% block title %}Login · CSU111 TA Evaluation{% endblock %}
+{% block body %}
+<div class="login-shell">
+  <div class="login-card">
+    <span class="emoji-badge">📋</span>
+    <div class="kicker">CSU111 · TA Evaluation</div>
+    <h1><span class="gradient-text">Sign in</span></h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category if category in ['success','error','warning'] else 'error' }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST">
+      <label for="username">Name</label>
+      <input type="text" id="username" name="username" placeholder="Enter your name" required autocomplete="username">
+
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" placeholder="Enter password" required autocomplete="current-password">
+
+      <button type="submit">Log in</button>
+    </form>
   </div>
 </div>
 {% endblock %}
