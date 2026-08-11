@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ta-evaluation
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --worker-class gthread --threads 8 --timeout 120 --access-logfile - --error-logfile - app:app
+    envVars:
+      - key: SECRET_KEY
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: TA_PASSWORD
+        sync: false
+      - key: INSTRUCTOR_PASSWORD
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.13.5

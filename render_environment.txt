@@ -1,0 +1,27 @@
+RENDER ENVIRONMENT VARIABLES
+
+Keep/use these variables in your existing Render service:
+
+SECRET_KEY
+<your existing Flask secret>
+
+GOOGLE_SHEET_ID
+<your existing Google Sheet ID>
+
+GOOGLE_CREDENTIALS_JSON
+<complete service-account JSON>
+
+TA_PASSWORD
+<password shared by TAs>
+
+INSTRUCTOR_PASSWORD
+<password shared by instructors>
+
+Do not commit credentials.json or passwords to GitHub.
+Do not change the variable names.
+
+Build Command:
+pip install -r requirements.txt
+
+Start Command:
+gunicorn --workers 1 --worker-class gthread --threads 8 --timeout 120 --access-logfile - --error-logfile - app:app
