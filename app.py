@@ -129,6 +129,21 @@ def normalize_student_id(value):
     return value[:-1] if value.endswith("G") else value
 
 
+def status_to_bit(is_present):
+    """Frontend still works with Present/Absent; sheet stores 1/0."""
+    return 1 if is_present else 0
+
+
+def bit_to_status(raw_value):
+    """Convert whatever is stored in the sheet (1/0, '1'/'0', or legacy
+    'Present'/'Absent' text) back into the Present/Absent strings the
+    templates already expect, so the frontend needs no changes."""
+    value = str(raw_value).strip().lower()
+    if value in ("1", "1.0", "present", "true", "yes"):
+        return "Present"
+    return "Absent"
+
+
 def find_student(students, search_value):
     search_value = normalize_student_id(search_value)
 
@@ -385,10 +400,10 @@ def dashboard():
         for record in attendance_records:
             ta_name = str(record.get("TA_Name", "")).strip()
             date = str(record.get("Date", "")).strip()
-            status = str(record.get("Status", "")).strip()
+            status = record.get("Status", "")
 
             if date == today and ta_name in ta_attendance:
-                ta_attendance[ta_name] = status or "Absent"
+                ta_attendance[ta_name] = bit_to_status(status)
 
     return render_template(
         "dashboard.html",
@@ -436,10 +451,10 @@ def attendance():
         for record in records:
             name = str(record.get("TA_Name", "")).strip()
             date = str(record.get("Date", "")).strip()
-            status = str(record.get("Status", "")).strip()
+            status = record.get("Status", "")
 
             if date == today and name in result:
-                result[name] = status or "Absent"
+                result[name] = bit_to_status(status)
 
         return result
 
@@ -461,7 +476,8 @@ def attendance():
 
             for name in ta_names:
 
-                status = "Present" if name in selected else "Absent"
+                is_present = name in selected
+                status_bit = status_to_bit(is_present)
 
                 if name in existing_rows:
 
@@ -469,13 +485,14 @@ def attendance():
 
                     ta_attendance_ws.update(
                         f"A{row}:C{row}",
-                        [[name, today, status]]
+                        [[name, today, status_bit]],
+                        value_input_option="USER_ENTERED"
                     )
 
                 else:
 
                     ta_attendance_ws.append_row(
-                        [name, today, status],
+                        [name, today, status_bit],
                         value_input_option="USER_ENTERED"
                     )
 
