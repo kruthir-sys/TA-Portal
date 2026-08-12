@@ -6,6 +6,7 @@ import os
 import json
 import threading
 import time
+import re
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
@@ -63,7 +64,7 @@ _tas_cache = {"data": None, "expires": 0}
 _instructors_cache = {"data": None, "expires": 0}
 _marks_cache = {"data": None, "expires": 0}
 
-STUDENTS_CACHE_SECONDS = 300
+STUDENTS_CACHE_SECONDS = 10
 TA_CACHE_SECONDS = 30
 INSTRUCTOR_CACHE_SECONDS = 30
 MARKS_CACHE_SECONDS = 3
@@ -124,9 +125,75 @@ def get_marks():
 
 
 def normalize_student_id(value):
+    """
+    Normalize a student ID for searching.
+
+    Examples:
+        2026A7PS0702G -> 2026A7PS0702
+        2026A7PS0702  -> 2026A7PS0702
+        2026 a7ps 0702 g -> 2026A7PS0702
+        0702 -> 0702
+    """
     value = str(value or "").strip().upper()
-    # Ignore only the final G in IDs such as 2026A7PS0702G.
-    return value[:-1] if value.endswith("G") else value
+
+    # Remove spaces and common separators that may be present in Sheets.
+    value = re.sub(r"[^A-Z0-9]", "", value)
+
+    # Ignore ONLY the final G.
+    if value.endswith("G"):
+        value = value[:-1]
+
+    return value
+
+
+def record_value(record, *possible_names):
+    """
+    Read a field even if the Google Sheet header has spaces,
+    underscores, different capitalization, etc.
+    """
+    normalized_headers = {}
+
+    for key, value in record.items():
+        normalized_key = re.sub(
+            r"[^A-Z0-9]",
+            "",
+            str(key).strip().upper()
+        )
+        normalized_headers[normalized_key] = value
+
+    for name in possible_names:
+        normalized_name = re.sub(
+            r"[^A-Z0-9]",
+            "",
+            str(name).strip().upper()
+        )
+
+        if normalized_name in normalized_headers:
+            return normalized_headers[normalized_name]
+
+    return ""
+
+
+def student_id_from_record(student):
+    return record_value(
+        student,
+        "Student_ID",
+        "Student ID",
+        "StudentID",
+        "BITS ID",
+        "BITS_ID",
+        "ID"
+    )
+
+
+def student_name_from_record(student):
+    return record_value(
+        student,
+        "Student_Name",
+        "Student Name",
+        "StudentName",
+        "Name"
+    )
 
 
 def status_to_bit(is_present):
@@ -147,8 +214,11 @@ def bit_to_status(raw_value):
 def find_student(students, search_value):
     search_value = normalize_student_id(search_value)
 
+    if not search_value:
+        return None
+
     for student in students:
-        sid = normalize_student_id(student.get("Student_ID", ""))
+        sid = normalize_student_id(student_id_from_record(student))
 
         if sid == search_value:
             return student
@@ -203,187 +273,165 @@ def login():
 # ================= DASHBOARD =================
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
-
     if "user" not in session:
         return redirect("/")
 
     role = session["role"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    search_query = request.args.get("search", "").strip()
 
-    students = get_students()
-    marks = get_marks()
+    # Always read Students directly for searching.
+    students = students_ws.get_all_records()
+    marks = marks_ws.get_all_records()
     tas = get_tas()
 
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # Normalize IDs once.  The final G is ignored.
-    normalized_students = {}
-    for student in students:
-        sid = normalize_student_id(student.get("Student_ID", ""))
-        if sid:
-            normalized_students[sid] = student
-
-    # ===== SEARCH =====
-    search_query = request.args.get("search", "").strip()
-    search_value = normalize_student_id(search_query)
     search_results = []
 
-    if search_value:
-        for sid, student in normalized_students.items():
+    if search_query:
+        q = normalize_student_id(search_query)
 
-            # Full ID OR last 4 digits.
-            if sid != search_value and not (
-                len(search_value) == 4 and sid.endswith(search_value)
-            ):
+        for student in students:
+            # EXACT Students-sheet headers supplied by the user.
+            raw_id = str(student.get("Student ID", "")).strip()
+            name = str(student.get("Student Name", "")).strip()
+
+            sid = normalize_student_id(raw_id)
+
+            if not sid:
                 continue
 
-            student_view = dict(student)
+            # Match full ID OR last four digits.
+            if sid == q or (len(q) == 4 and sid.endswith(q)):
+                view = {
+                    "Student_ID": raw_id,
+                    "Student_Name": name,
+                    "graded": False,
+                    "existing_marks": "",
+                    "graded_by": "",
+                    "graded_date": ""
+                }
 
-            # IMPORTANT:
-            # Grading is date-wise. Only today's Marks record locks the
-            # student for today's grading and is displayed as the current grade.
-            existing = next(
-                (
-                    m for m in marks
-                    if normalize_student_id(m.get("Student_ID", "")) == sid
-                    and str(m.get("Date", "")).strip() == today
-                ),
-                None
-            )
+                # EXACT Marks-sheet headers supplied by the user.
+                # Only today's grade is considered the current grade.
+                for mark in marks:
+                    mark_id = normalize_student_id(
+                        str(mark.get("Student_ID", "")).strip()
+                    )
+                    mark_date = str(
+                        mark.get("Date", "")
+                    ).strip()
 
-            student_view["graded"] = existing is not None
-            student_view["existing_marks"] = (
-                existing.get("Marks", "") if existing else ""
-            )
-            student_view["graded_by"] = (
-                existing.get("TA", "") if existing else ""
-            )
-            student_view["graded_date"] = (
-                existing.get("Date", "") if existing else ""
-            )
+                    if mark_id == sid and mark_date == today:
+                        view["graded"] = True
+                        view["existing_marks"] = mark.get("Marks", "")
+                        view["graded_by"] = mark.get("TA", "")
+                        view["graded_date"] = mark_date
+                        break
 
-            search_results.append(student_view)
+                search_results.append(view)
 
-    # ===== SUBMIT / UPDATE MARKS =====
+    # ---------- SAVE / UPDATE MARKS ----------
     if request.method == "POST":
-
-        student_id = str(
+        submitted_id = str(
             request.form.get("student_id", "")
         ).strip()
-
-        new_marks = str(
+        submitted_marks = str(
             request.form.get("marks", "")
         ).strip()
 
-        if not student_id or new_marks == "":
-            flash("Please enter a student ID and marks.", "error")
+        sid = normalize_student_id(submitted_id)
+
+        if not sid or not submitted_marks:
+            flash("Please enter the student ID and marks.", "error")
             return redirect(url_for_dashboard(search_query))
 
-        normalized_student_id = normalize_student_id(student_id)
+        matched_student = None
 
-        matched = next(
-            (
-                s for s in students
-                if normalize_student_id(s.get("Student_ID", "")) == normalized_student_id
-            ),
-            None
-        )
+        for student in students:
+            raw_id = str(student.get("Student ID", "")).strip()
 
-        if not matched:
+            if normalize_student_id(raw_id) == sid:
+                matched_student = student
+                break
+
+        if matched_student is None:
             flash("Student not found.", "error")
-            return redirect("/dashboard")
+            return redirect(url_for_dashboard(
+                sid[-4:] if len(sid) >= 4 else sid
+            ))
 
-        # Convert marks to a real number.
         try:
-            marks_number = float(new_marks)
-            if marks_number.is_integer():
-                marks_number = int(marks_number)
-        except (ValueError, TypeError):
+            marks_value = float(submitted_marks)
+            if marks_value.is_integer():
+                marks_value = int(marks_value)
+        except ValueError:
             flash("Marks must be a number.", "error")
-            return redirect(
-                url_for_dashboard(normalized_student_id[-4:])
-            )
+            return redirect(url_for_dashboard(
+                sid[-4:] if len(sid) >= 4 else sid
+            ))
 
         with write_lock:
-
-            # Always re-read the sheet before checking today's grade.
             latest_marks = marks_ws.get_all_records()
 
-            existing_today = next(
-                (
-                    m for m in latest_marks
-                    if normalize_student_id(m.get("Student_ID", "")) == normalized_student_id
-                    and str(m.get("Date", "")).strip() == today
-                ),
-                None
-            )
+            today_row = None
+            today_record = None
 
-            # TA cannot modify today's existing grade.
-            if role == "ta" and existing_today:
+            for row_no, mark in enumerate(latest_marks, start=2):
+                mark_id = normalize_student_id(
+                    str(mark.get("Student_ID", "")).strip()
+                )
+                mark_date = str(mark.get("Date", "")).strip()
+
+                if mark_id == sid and mark_date == today:
+                    today_row = row_no
+                    today_record = mark
+                    break
+
+            # TA cannot change a grade already entered today.
+            if role == "ta" and today_record is not None:
                 invalidate_marks_cache()
                 flash(
-                    "This student is already graded today. TA marks are locked.",
+                    "This student is already marked today. "
+                    "TA marks cannot be changed.",
                     "warning"
                 )
-                return redirect(
-                    url_for_dashboard(normalized_student_id[-4:])
-                )
+                return redirect(url_for_dashboard(
+                    sid[-4:] if len(sid) >= 4 else sid
+                ))
 
-            if existing_today:
-                # Instructor can change today's grade.
-                # Locate the row using the normalized ID AND today's date.
-                row = None
-
-                for row_number, record in enumerate(latest_marks, start=2):
-                    if (
-                        normalize_student_id(record.get("Student_ID", "")) == normalized_student_id
-                        and str(record.get("Date", "")).strip() == today
-                    ):
-                        row = row_number
-                        break
-
-                if row is None:
-                    flash("Today's marks record could not be found.", "error")
-                    return redirect(
-                        url_for_dashboard(normalized_student_id[-4:])
-                    )
-
+            if today_row is not None:
+                # Instructor updates today's grade.
                 marks_ws.update(
-                    f"C{row}:E{row}",
-                    [[marks_number, session["user"], today]],
+                    f"C{today_row}:E{today_row}",
+                    [[marks_value, session["user"], today]],
                     value_input_option="USER_ENTERED"
                 )
-
                 message = "Marks updated successfully."
-
             else:
-                # No grade exists for TODAY.
-                # Therefore a new record is appended even if this student
-                # was graded on a previous date.
+                # New record for today's date.
                 marks_ws.append_row(
                     [
-                        matched["Student_ID"],
-                        matched["Student_Name"],
-                        marks_number,
+                        matched_student.get("Student ID", ""),
+                        matched_student.get("Student Name", ""),
+                        marks_value,
                         session["user"],
                         today
                     ],
                     value_input_option="USER_ENTERED"
                 )
-
                 message = "Marks submitted successfully."
 
             invalidate_marks_cache()
 
         flash(message, "success")
+        return redirect(url_for_dashboard(
+            sid[-4:] if len(sid) >= 4 else sid
+        ))
 
-        return redirect(
-            url_for_dashboard(normalized_student_id[-4:])
-        )
-
-    # ===== STATS — TODAY ONLY =====
+    # ---------- TODAY'S STATISTICS ----------
     marks_today = [
-        mark for mark in marks
-        if str(mark.get("Date", "")).strip() == today
+        m for m in marks
+        if str(m.get("Date", "")).strip() == today
     ]
 
     total_students = len(students)
@@ -395,11 +443,10 @@ def dashboard():
         if str(t.get("TA_Name", "")).strip()
     ]
 
-    ta_counts = {ta: 0 for ta in ta_names}
+    ta_counts = {name: 0 for name in ta_names}
 
     for mark in marks_today:
         grader = str(mark.get("TA", "")).strip()
-
         if grader in ta_counts:
             ta_counts[grader] += 1
 
@@ -411,24 +458,29 @@ def dashboard():
         if str(mark.get("TA", "")).strip() not in ta_counts
     )
 
-    # Today's TA attendance for instructor dashboard.
+    # ---------- TODAY'S TA ATTENDANCE ----------
     ta_attendance = {}
 
     if role == "instructor":
         attendance_records = ta_attendance_ws.get_all_records()
 
         ta_attendance = {
-            ta: "Absent"
-            for ta in ta_names
+            name: "Absent"
+            for name in ta_names
         }
 
         for record in attendance_records:
-            ta_name = str(record.get("TA_Name", "")).strip()
-            date = str(record.get("Date", "")).strip()
-            status = record.get("Status", "")
+            ta_name = str(
+                record.get("TA_Name", "")
+            ).strip()
+            date = str(
+                record.get("Date", "")
+            ).strip()
 
             if date == today and ta_name in ta_attendance:
-                ta_attendance[ta_name] = bit_to_status(status)
+                ta_attendance[ta_name] = bit_to_status(
+                    record.get("Status", "")
+                )
 
     return render_template(
         "dashboard.html",
@@ -443,6 +495,13 @@ def dashboard():
         ta_attendance=ta_attendance,
         today=today
     )
+
+
+def url_for_dashboard(search_value=""):
+    if search_value:
+        from urllib.parse import quote
+        return "/dashboard?search=" + quote(str(search_value))
+    return "/dashboard"
 
 
 # ================= ATTENDANCE =================
