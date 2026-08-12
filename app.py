@@ -360,9 +360,17 @@ def dashboard():
             url_for_dashboard(student_id[-4:])
         )
 
-    # ===== STATS =====
+    # ===== STATS (today only) =====
+    today = datetime.now().strftime("%Y-%m-%d")
+
     total_students = len(students)
-    graded = len(marks)
+
+    marks_today = [
+        mark for mark in marks
+        if str(mark.get("Date", "")).strip() == today
+    ]
+
+    graded = len(marks_today)
 
     ta_names = [
         str(t.get("TA_Name", "")).strip()
@@ -372,7 +380,7 @@ def dashboard():
 
     ta_counts = {ta: 0 for ta in ta_names}
 
-    for mark in marks:
+    for mark in marks_today:
         grader = str(mark.get("TA", "")).strip()
 
         if grader in ta_counts:
@@ -381,13 +389,12 @@ def dashboard():
     graded_by_ta = sum(ta_counts.values())
 
     graded_by_instructor = sum(
-        1 for mark in marks
+        1 for mark in marks_today
         if str(mark.get("TA", "")).strip() not in ta_counts
     )
 
     # Today's TA attendance for instructor dashboard.
     ta_attendance = {}
-    today = datetime.now().strftime("%Y-%m-%d")
 
     if role == "instructor":
         attendance_records = ta_attendance_ws.get_all_records()
