@@ -246,30 +246,47 @@ def health():
 @app.route("/", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "")
 
         instructors = get_instructors()
         tas = get_tas()
 
         # Instructor login
         for ins in instructors:
-            if ins["Instructor_Name"] == username and password == INSTRUCTOR_PASSWORD:
-                session["user"] = username
+            full_name = str(ins.get("Instructor_Name", "")).strip()
+            
+            if not full_name:
+                continue
+
+            first_name = full_name.split()[0].lower()
+
+            if username == first_name and password == INSTRUCTOR_PASSWORD:
+                # Store the actual full name
+                session["user"] = full_name
                 session["role"] = "instructor"
+
                 return redirect("/dashboard")
 
         # TA login
         for ta in tas:
-            if ta["TA_Name"] == username and password == TA_PASSWORD:
-                session["user"] = username
+            full_name = str(ta.get("TA_Name", "")).strip()
+
+            if not full_name:
+                continue
+
+            first_name = full_name.split()[0].lower()
+
+            if username == first_name and password == TA_PASSWORD:
+                # Store the actual full name
+                session["user"] = full_name
                 session["role"] = "ta"
+
                 return redirect("/dashboard")
 
         flash("Invalid login", "error")
 
     return render_template("login.html")
-
 # ================= DASHBOARD =================
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
