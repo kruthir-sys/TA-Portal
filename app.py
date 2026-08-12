@@ -213,44 +213,55 @@ def dashboard():
     marks = get_marks()
     tas = get_tas()
 
-    # Build a fresh dictionary from the latest marks snapshot.
-    marks_dict = {
-        str(m.get("Student_ID", "")).strip(): m
-        for m in marks
-        if str(m.get("Student_ID", "")).strip()
-    }
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Normalize IDs once.  The final G is ignored.
+    normalized_students = {}
+    for student in students:
+        sid = normalize_student_id(student.get("Student_ID", ""))
+        if sid:
+            normalized_students[sid] = student
 
     # ===== SEARCH =====
     search_query = request.args.get("search", "").strip()
+    search_value = normalize_student_id(search_query)
     search_results = []
 
-    if search_query:
-        search_value = normalize_student_id(search_query)
+    if search_value:
+        for sid, student in normalized_students.items():
 
-        for student in students:
-            sid = normalize_student_id(student.get("Student_ID", ""))
-
-            if sid == search_value or (
+            # Full ID OR last 4 digits.
+            if sid != search_value and not (
                 len(search_value) == 4 and sid.endswith(search_value)
             ):
-                student_view = dict(student)
+                continue
 
-                existing = marks_dict.get(
-                    str(student.get("Student_ID", "")).strip()
-                )
+            student_view = dict(student)
 
-                student_view["graded"] = existing is not None
-                student_view["existing_marks"] = (
-                    existing.get("Marks", "") if existing else ""
-                )
-                student_view["graded_by"] = (
-                    existing.get("TA", "") if existing else ""
-                )
-                student_view["graded_date"] = (
-                    existing.get("Date", "") if existing else ""
-                )
+            # IMPORTANT:
+            # Grading is date-wise. Only today's Marks record locks the
+            # student for today's grading and is displayed as the current grade.
+            existing = next(
+                (
+                    m for m in marks
+                    if normalize_student_id(m.get("Student_ID", "")) == sid
+                    and str(m.get("Date", "")).strip() == today
+                ),
+                None
+            )
 
-                search_results.append(student_view)
+            student_view["graded"] = existing is not None
+            student_view["existing_marks"] = (
+                existing.get("Marks", "") if existing else ""
+            )
+            student_view["graded_by"] = (
+                existing.get("TA", "") if existing else ""
+            )
+            student_view["graded_date"] = (
+                existing.get("Date", "") if existing else ""
+            )
+
+            search_results.append(student_view)
 
     # ===== SUBMIT / UPDATE MARKS =====
     if request.method == "POST":
@@ -265,14 +276,14 @@ def dashboard():
 
         if not student_id or new_marks == "":
             flash("Please enter a student ID and marks.", "error")
-            return redirect(
-                url_for_dashboard(search_query)
-            )
+            return redirect(url_for_dashboard(search_query))
+
+        normalized_student_id = normalize_student_id(student_id)
 
         matched = next(
             (
                 s for s in students
-                if str(s.get("Student_ID", "")).strip() == student_id
+                if normalize_student_id(s.get("Student_ID", "")) == normalized_student_id
             ),
             None
         )
@@ -281,54 +292,61 @@ def dashboard():
             flash("Student not found.", "error")
             return redirect("/dashboard")
 
-        # Critical section: re-read Marks immediately before writing.
-        # This prevents two TAs from grading the same student at the same
-        # time based on a stale page.
+        # Convert marks to a real number.
+        try:
+            marks_number = float(new_marks)
+            if marks_number.is_integer():
+                marks_number = int(marks_number)
+        except (ValueError, TypeError):
+            flash("Marks must be a number.", "error")
+            return redirect(
+                url_for_dashboard(normalized_student_id[-4:])
+            )
+
         with write_lock:
 
+            # Always re-read the sheet before checking today's grade.
             latest_marks = marks_ws.get_all_records()
 
-            existing = next(
+            existing_today = next(
                 (
                     m for m in latest_marks
-                    if str(m.get("Student_ID", "")).strip() == student_id
+                    if normalize_student_id(m.get("Student_ID", "")) == normalized_student_id
+                    and str(m.get("Date", "")).strip() == today
                 ),
                 None
             )
 
-            if role == "ta" and existing:
+            # TA cannot modify today's existing grade.
+            if role == "ta" and existing_today:
                 invalidate_marks_cache()
                 flash(
-                    "This student is already graded. TA marks are locked.",
+                    "This student is already graded today. TA marks are locked.",
                     "warning"
                 )
                 return redirect(
-                    url_for_dashboard(student_id[-4:])
+                    url_for_dashboard(normalized_student_id[-4:])
                 )
 
-            # Validate and convert marks to a real number.
-            # This is important because Google Sheets pivots will treat
-            # text values as COUNTA/1 instead of numeric marks.
-            try:
-                marks_number = float(new_marks)
-                if marks_number.is_integer():
-                    marks_number = int(marks_number)
-            except (ValueError, TypeError):
-                flash("Marks must be a number.", "error")
-                return redirect(
-                    url_for_dashboard(student_id[-4:])
-                )
+            if existing_today:
+                # Instructor can change today's grade.
+                # Locate the row using the normalized ID AND today's date.
+                row = None
 
-            today = datetime.now().strftime("%Y-%m-%d")
+                for row_number, record in enumerate(latest_marks, start=2):
+                    if (
+                        normalize_student_id(record.get("Student_ID", "")) == normalized_student_id
+                        and str(record.get("Date", "")).strip() == today
+                    ):
+                        row = row_number
+                        break
 
-            if existing:
+                if row is None:
+                    flash("Today's marks record could not be found.", "error")
+                    return redirect(
+                        url_for_dashboard(normalized_student_id[-4:])
+                    )
 
-                cell = marks_ws.find(student_id)
-                row = cell.row
-
-                # Column C = Marks
-                # Column D = TA / Instructor
-                # Column E = Date
                 marks_ws.update(
                     f"C{row}:E{row}",
                     [[marks_number, session["user"], today]],
@@ -338,10 +356,12 @@ def dashboard():
                 message = "Marks updated successfully."
 
             else:
-
+                # No grade exists for TODAY.
+                # Therefore a new record is appended even if this student
+                # was graded on a previous date.
                 marks_ws.append_row(
                     [
-                        student_id,
+                        matched["Student_ID"],
                         matched["Student_Name"],
                         marks_number,
                         session["user"],
@@ -357,19 +377,16 @@ def dashboard():
         flash(message, "success")
 
         return redirect(
-            url_for_dashboard(student_id[-4:])
+            url_for_dashboard(normalized_student_id[-4:])
         )
 
-    # ===== STATS (today only) =====
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    total_students = len(students)
-
+    # ===== STATS — TODAY ONLY =====
     marks_today = [
         mark for mark in marks
         if str(mark.get("Date", "")).strip() == today
     ]
 
+    total_students = len(students)
     graded = len(marks_today)
 
     ta_names = [
@@ -389,7 +406,8 @@ def dashboard():
     graded_by_ta = sum(ta_counts.values())
 
     graded_by_instructor = sum(
-        1 for mark in marks_today
+        1
+        for mark in marks_today
         if str(mark.get("TA", "")).strip() not in ta_counts
     )
 
@@ -425,13 +443,6 @@ def dashboard():
         ta_attendance=ta_attendance,
         today=today
     )
-
-
-def url_for_dashboard(search_value=""):
-    if search_value:
-        from urllib.parse import quote
-        return "/dashboard?search=" + quote(str(search_value))
-    return "/dashboard"
 
 
 # ================= ATTENDANCE =================
