@@ -129,31 +129,6 @@ def normalize_student_id(value):
     return value[:-1] if value.endswith("G") else value
 
 
-def _normalize_header(name):
-    return str(name or "").strip().lower().replace(" ", "").replace("_", "")
-
-
-def get_field(record, *field_names):
-    """Read a value from a gspread record dict even if the actual sheet
-    header doesn't match the expected spelling exactly (extra space,
-    different casing, underscore vs space, etc). Falls back to an empty
-    string if no matching column is found."""
-    if not record:
-        return ""
-
-    targets = {_normalize_header(name) for name in field_names}
-
-    for key, value in record.items():
-        if _normalize_header(key) in targets:
-            return value
-
-    return ""
-
-
-def get_student_id(record):
-    return str(get_field(record, "Student_ID", "StudentID", "Student Id") or "").strip()
-
-
 def status_to_bit(is_present):
     """Frontend still works with Present/Absent; sheet stores 1/0."""
     return 1 if is_present else 0
@@ -173,7 +148,7 @@ def find_student(students, search_value):
     search_value = normalize_student_id(search_value)
 
     for student in students:
-        sid = normalize_student_id(get_student_id(student))
+        sid = normalize_student_id(student.get("Student_ID", ""))
 
         if sid == search_value:
             return student
@@ -234,21 +209,15 @@ def dashboard():
 
     role = session["role"]
 
-    today = datetime.now().strftime("%Y-%m-%d")
-
     students = get_students()
     marks = get_marks()
     tas = get_tas()
 
-    # Grading resets every day, same as attendance: a student is only
-    # considered "already graded" if there's a row for them dated today.
-    # Older rows from previous days stay in the sheet as history but don't
-    # lock today's grading.
+    # Build a fresh dictionary from the latest marks snapshot.
     marks_dict = {
-        get_student_id(m): m
+        str(m.get("Student_ID", "")).strip(): m
         for m in marks
-        if get_student_id(m)
-        and str(get_field(m, "Date")).strip() == today
+        if str(m.get("Student_ID", "")).strip()
     }
 
     # ===== SEARCH =====
@@ -259,24 +228,26 @@ def dashboard():
         search_value = normalize_student_id(search_query)
 
         for student in students:
-            sid = normalize_student_id(get_student_id(student))
+            sid = normalize_student_id(student.get("Student_ID", ""))
 
             if sid == search_value or (
                 len(search_value) == 4 and sid.endswith(search_value)
             ):
                 student_view = dict(student)
 
-                existing = marks_dict.get(get_student_id(student))
+                existing = marks_dict.get(
+                    str(student.get("Student_ID", "")).strip()
+                )
 
                 student_view["graded"] = existing is not None
                 student_view["existing_marks"] = (
-                    get_field(existing, "Marks") if existing else ""
+                    existing.get("Marks", "") if existing else ""
                 )
                 student_view["graded_by"] = (
-                    get_field(existing, "TA") if existing else ""
+                    existing.get("TA", "") if existing else ""
                 )
                 student_view["graded_date"] = (
-                    get_field(existing, "Date") if existing else ""
+                    existing.get("Date", "") if existing else ""
                 )
 
                 search_results.append(student_view)
@@ -301,7 +272,7 @@ def dashboard():
         matched = next(
             (
                 s for s in students
-                if get_student_id(s) == student_id
+                if str(s.get("Student_ID", "")).strip() == student_id
             ),
             None
         )
@@ -317,25 +288,18 @@ def dashboard():
 
             latest_marks = marks_ws.get_all_records()
 
-            # Only a row dated today counts as "already graded" — grading
-            # resets every day, so yesterday's row (if any) is left alone
-            # as history and a fresh row is created for today.
-            existing_row_number = None
-            existing = None
-
-            for idx, m in enumerate(latest_marks, start=2):
-                if (
-                    get_student_id(m) == student_id
-                    and str(get_field(m, "Date")).strip() == today
-                ):
-                    existing = m
-                    existing_row_number = idx
-                    break
+            existing = next(
+                (
+                    m for m in latest_marks
+                    if str(m.get("Student_ID", "")).strip() == student_id
+                ),
+                None
+            )
 
             if role == "ta" and existing:
                 invalidate_marks_cache()
                 flash(
-                    "This student is already graded today. TA marks are locked.",
+                    "This student is already graded. TA marks are locked.",
                     "warning"
                 )
                 return redirect(
@@ -355,13 +319,18 @@ def dashboard():
                     url_for_dashboard(student_id[-4:])
                 )
 
+            today = datetime.now().strftime("%Y-%m-%d")
+
             if existing:
+
+                cell = marks_ws.find(student_id)
+                row = cell.row
 
                 # Column C = Marks
                 # Column D = TA / Instructor
                 # Column E = Date
                 marks_ws.update(
-                    f"C{existing_row_number}:E{existing_row_number}",
+                    f"C{row}:E{row}",
                     [[marks_number, session["user"], today]],
                     value_input_option="USER_ENTERED"
                 )
@@ -392,6 +361,8 @@ def dashboard():
         )
 
     # ===== STATS (today only) =====
+    today = datetime.now().strftime("%Y-%m-%d")
+
     total_students = len(students)
 
     marks_today = [
