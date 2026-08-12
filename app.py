@@ -209,15 +209,21 @@ def dashboard():
 
     role = session["role"]
 
+    today = datetime.now().strftime("%Y-%m-%d")
+
     students = get_students()
     marks = get_marks()
     tas = get_tas()
 
-    # Build a fresh dictionary from the latest marks snapshot.
+    # Grading resets every day, same as attendance: a student is only
+    # considered "already graded" if there's a row for them dated today.
+    # Older rows from previous days stay in the sheet as history but don't
+    # lock today's grading.
     marks_dict = {
         str(m.get("Student_ID", "")).strip(): m
         for m in marks
         if str(m.get("Student_ID", "")).strip()
+        and str(m.get("Date", "")).strip() == today
     }
 
     # ===== SEARCH =====
@@ -288,18 +294,25 @@ def dashboard():
 
             latest_marks = marks_ws.get_all_records()
 
-            existing = next(
-                (
-                    m for m in latest_marks
-                    if str(m.get("Student_ID", "")).strip() == student_id
-                ),
-                None
-            )
+            # Only a row dated today counts as "already graded" — grading
+            # resets every day, so yesterday's row (if any) is left alone
+            # as history and a fresh row is created for today.
+            existing_row_number = None
+            existing = None
+
+            for idx, m in enumerate(latest_marks, start=2):
+                if (
+                    str(m.get("Student_ID", "")).strip() == student_id
+                    and str(m.get("Date", "")).strip() == today
+                ):
+                    existing = m
+                    existing_row_number = idx
+                    break
 
             if role == "ta" and existing:
                 invalidate_marks_cache()
                 flash(
-                    "This student is already graded. TA marks are locked.",
+                    "This student is already graded today. TA marks are locked.",
                     "warning"
                 )
                 return redirect(
@@ -319,18 +332,13 @@ def dashboard():
                     url_for_dashboard(student_id[-4:])
                 )
 
-            today = datetime.now().strftime("%Y-%m-%d")
-
             if existing:
-
-                cell = marks_ws.find(student_id)
-                row = cell.row
 
                 # Column C = Marks
                 # Column D = TA / Instructor
                 # Column E = Date
                 marks_ws.update(
-                    f"C{row}:E{row}",
+                    f"C{existing_row_number}:E{existing_row_number}",
                     [[marks_number, session["user"], today]],
                     value_input_option="USER_ENTERED"
                 )
@@ -361,8 +369,6 @@ def dashboard():
         )
 
     # ===== STATS (today only) =====
-    today = datetime.now().strftime("%Y-%m-%d")
-
     total_students = len(students)
 
     marks_today = [
