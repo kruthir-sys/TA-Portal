@@ -129,6 +129,31 @@ def normalize_student_id(value):
     return value[:-1] if value.endswith("G") else value
 
 
+def _normalize_header(name):
+    return str(name or "").strip().lower().replace(" ", "").replace("_", "")
+
+
+def get_field(record, *field_names):
+    """Read a value from a gspread record dict even if the actual sheet
+    header doesn't match the expected spelling exactly (extra space,
+    different casing, underscore vs space, etc). Falls back to an empty
+    string if no matching column is found."""
+    if not record:
+        return ""
+
+    targets = {_normalize_header(name) for name in field_names}
+
+    for key, value in record.items():
+        if _normalize_header(key) in targets:
+            return value
+
+    return ""
+
+
+def get_student_id(record):
+    return str(get_field(record, "Student_ID", "StudentID", "Student Id") or "").strip()
+
+
 def status_to_bit(is_present):
     """Frontend still works with Present/Absent; sheet stores 1/0."""
     return 1 if is_present else 0
@@ -148,7 +173,7 @@ def find_student(students, search_value):
     search_value = normalize_student_id(search_value)
 
     for student in students:
-        sid = normalize_student_id(student.get("Student_ID", ""))
+        sid = normalize_student_id(get_student_id(student))
 
         if sid == search_value:
             return student
@@ -220,10 +245,10 @@ def dashboard():
     # Older rows from previous days stay in the sheet as history but don't
     # lock today's grading.
     marks_dict = {
-        str(m.get("Student_ID", "")).strip(): m
+        get_student_id(m): m
         for m in marks
-        if str(m.get("Student_ID", "")).strip()
-        and str(m.get("Date", "")).strip() == today
+        if get_student_id(m)
+        and str(get_field(m, "Date")).strip() == today
     }
 
     # ===== SEARCH =====
@@ -234,26 +259,24 @@ def dashboard():
         search_value = normalize_student_id(search_query)
 
         for student in students:
-            sid = normalize_student_id(student.get("Student_ID", ""))
+            sid = normalize_student_id(get_student_id(student))
 
             if sid == search_value or (
                 len(search_value) == 4 and sid.endswith(search_value)
             ):
                 student_view = dict(student)
 
-                existing = marks_dict.get(
-                    str(student.get("Student_ID", "")).strip()
-                )
+                existing = marks_dict.get(get_student_id(student))
 
                 student_view["graded"] = existing is not None
                 student_view["existing_marks"] = (
-                    existing.get("Marks", "") if existing else ""
+                    get_field(existing, "Marks") if existing else ""
                 )
                 student_view["graded_by"] = (
-                    existing.get("TA", "") if existing else ""
+                    get_field(existing, "TA") if existing else ""
                 )
                 student_view["graded_date"] = (
-                    existing.get("Date", "") if existing else ""
+                    get_field(existing, "Date") if existing else ""
                 )
 
                 search_results.append(student_view)
@@ -278,7 +301,7 @@ def dashboard():
         matched = next(
             (
                 s for s in students
-                if str(s.get("Student_ID", "")).strip() == student_id
+                if get_student_id(s) == student_id
             ),
             None
         )
@@ -302,8 +325,8 @@ def dashboard():
 
             for idx, m in enumerate(latest_marks, start=2):
                 if (
-                    str(m.get("Student_ID", "")).strip() == student_id
-                    and str(m.get("Date", "")).strip() == today
+                    get_student_id(m) == student_id
+                    and str(get_field(m, "Date")).strip() == today
                 ):
                     existing = m
                     existing_row_number = idx
