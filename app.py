@@ -52,9 +52,26 @@ if not GOOGLE_SHEET_ID:
         "Add it in Render."
     )
 
-# One process + threads is recommended for this Google Sheets-backed app.
-# It lets the in-process lock protect simultaneous grading submissions.
-write_lock = threading.Lock()
+# ================= DEPLOYMENT REQUIREMENT =================
+# This app protects concurrent grading/attendance writes using in-process
+# locks (threading.Lock) and in-process caches (plain dicts). Both ONLY
+# work correctly if the whole app runs as a SINGLE process — multiple
+# threads inside that one process are fine and expected (that's how 15+
+# TAs and 4 instructors can use it at once), but multiple worker
+# PROCESSES are not: each process would get its own separate lock and
+# cache, so two people hitting different processes could race on the
+# same Google Sheet row and silently overwrite each other's grade.
+#
+# On Render (or any Gunicorn-based host), the start command must use
+# exactly one worker with several threads, e.g.:
+#     gunicorn app:app --workers 1 --threads 8 --timeout 60
+# Do NOT increase --workers above 1 unless the locking/caching below is
+# moved to something shared across processes (e.g. Redis).
+
+# Two separate locks so grading and attendance don't block each other —
+# they touch different worksheets and have nothing to do with one another.
+marks_lock = threading.Lock()
+attendance_lock = threading.Lock()
 
 # Short-lived caches reduce repeated full-sheet reads while keeping marks
 # responsive. Marks cache is invalidated immediately after writes.
@@ -64,10 +81,75 @@ _tas_cache = {"data": None, "expires": 0}
 _instructors_cache = {"data": None, "expires": 0}
 _marks_cache = {"data": None, "expires": 0}
 
-STUDENTS_CACHE_SECONDS = 10
-TA_CACHE_SECONDS = 30
-INSTRUCTOR_CACHE_SECONDS = 30
-MARKS_CACHE_SECONDS = 3
+# The student roster rarely changes during a grading session, so it can
+# be cached longer. Marks and attendance change constantly, so they stay
+# short — long enough to absorb bursts of concurrent page loads, short
+# enough that nobody sees stale data for more than a few seconds. All
+# are env-overridable in case load patterns change.
+STUDENTS_CACHE_SECONDS = int(os.environ.get("STUDENTS_CACHE_SECONDS", 60))
+TA_CACHE_SECONDS = int(os.environ.get("TA_CACHE_SECONDS", 30))
+INSTRUCTOR_CACHE_SECONDS = int(os.environ.get("INSTRUCTOR_CACHE_SECONDS", 60))
+MARKS_CACHE_SECONDS = int(os.environ.get("MARKS_CACHE_SECONDS", 3))
+
+# ================= RESILIENT SHEETS ACCESS =================
+# Google Sheets API returns HTTP 429 (rate limited) or transient 5xx
+# errors under bursty concurrent load. Without retries, a TA's grade
+# submission could fail outright even though nothing was actually wrong
+# with the data — that's the #1 way this kind of app "loses" a grade
+# from the user's point of view. Every read/write goes through here so
+# a transient hiccup is retried instead of surfacing as a lost update.
+SHEETS_MAX_ATTEMPTS = int(os.environ.get("SHEETS_MAX_ATTEMPTS", 4))
+SHEETS_RETRY_BASE_DELAY = float(os.environ.get("SHEETS_RETRY_BASE_DELAY", 0.6))
+
+
+def with_retry(func, *args, **kwargs):
+    attempt = 0
+
+    while True:
+        attempt += 1
+
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as exc:
+            status = None
+            try:
+                status = exc.response.status_code
+            except Exception:
+                pass
+
+            # Only retry on rate limiting / transient server errors.
+            # A genuine permission or bad-request error should surface
+            # immediately rather than retrying uselessly.
+            retryable = status is None or status == 429 or status >= 500
+
+            if not retryable or attempt >= SHEETS_MAX_ATTEMPTS:
+                raise
+
+            time.sleep(SHEETS_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+        except Exception:
+            if attempt >= SHEETS_MAX_ATTEMPTS:
+                raise
+            time.sleep(SHEETS_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+
+
+def safe_get_all_records(ws):
+    return with_retry(ws.get_all_records)
+
+
+def safe_update(ws, range_name, values, **kwargs):
+    return with_retry(ws.update, range_name, values, **kwargs)
+
+
+def safe_append_row(ws, row, **kwargs):
+    return with_retry(ws.append_row, row, **kwargs)
+
+
+def safe_batch_update(ws, data, **kwargs):
+    return with_retry(ws.batch_update, data, **kwargs)
+
+
+def safe_append_rows(ws, rows, **kwargs):
+    return with_retry(ws.append_rows, rows, **kwargs)
 
 
 def cached_records(ws, cache, ttl):
@@ -77,7 +159,7 @@ def cached_records(ws, cache, ttl):
         if cache["data"] is not None and now < cache["expires"]:
             return cache["data"]
 
-    data = ws.get_all_records()
+    data = safe_get_all_records(ws)
 
     with _cache_lock:
         cache["data"] = data
@@ -297,10 +379,27 @@ def dashboard():
     today = datetime.now().strftime("%Y-%m-%d")
     search_query = request.args.get("search", "").strip()
 
-    # Always read Students directly for searching.
-    students = students_ws.get_all_records()
-    marks = marks_ws.get_all_records()
+    # Cached reads instead of hitting the Sheets API on every single page
+    # load — at 15 TAs + 4 instructors this matters a lot. The marks
+    # cache is invalidated the instant anyone writes, so nobody sees
+    # data more than a few seconds stale.
+    students = get_students()
+    marks = get_marks()
     tas = get_tas()
+
+    # Build today's grading lookup ONCE per request instead of scanning
+    # the entire marks list for every matched student. With up to ~1000
+    # students and a growing Marks sheet, this turns what used to be an
+    # O(students x marks) nested scan into a single O(marks) pass.
+    marks_today_by_id = {}
+    for mark in marks:
+        if str(mark.get("Date", "")).strip() != today:
+            continue
+        mark_id = normalize_student_id(
+            str(mark.get("Student_ID", "")).strip()
+        )
+        if mark_id:
+            marks_today_by_id[mark_id] = mark
 
     search_results = []
 
@@ -328,22 +427,14 @@ def dashboard():
                     "graded_date": ""
                 }
 
-                # EXACT Marks-sheet headers supplied by the user.
                 # Only today's grade is considered the current grade.
-                for mark in marks:
-                    mark_id = normalize_student_id(
-                        str(mark.get("Student_ID", "")).strip()
-                    )
-                    mark_date = str(
-                        mark.get("Date", "")
-                    ).strip()
+                mark = marks_today_by_id.get(sid)
 
-                    if mark_id == sid and mark_date == today:
-                        view["graded"] = True
-                        view["existing_marks"] = mark.get("Marks", "")
-                        view["graded_by"] = mark.get("TA", "")
-                        view["graded_date"] = mark_date
-                        break
+                if mark is not None:
+                    view["graded"] = True
+                    view["existing_marks"] = mark.get("Marks", "")
+                    view["graded_by"] = mark.get("TA", "")
+                    view["graded_date"] = str(mark.get("Date", "")).strip()
 
                 search_results.append(view)
 
@@ -387,8 +478,8 @@ def dashboard():
                 sid[-4:] if len(sid) >= 4 else sid
             ))
 
-        with write_lock:
-            latest_marks = marks_ws.get_all_records()
+        with marks_lock:
+            latest_marks = safe_get_all_records(marks_ws)
 
             today_row = None
             today_record = None
@@ -416,34 +507,52 @@ def dashboard():
                     sid[-4:] if len(sid) >= 4 else sid
                 ))
 
-            if today_row is not None:
-                # Instructor updates today's grade.
-                marks_ws.update(
-                    f"C{today_row}:E{today_row}",
-                    [[marks_value, session["user"], today]],
-                    value_input_option="USER_ENTERED"
+            try:
+                if today_row is not None:
+                    # Instructor updates today's grade.
+                    safe_update(
+                        marks_ws,
+                        f"C{today_row}:E{today_row}",
+                        [[marks_value, session["user"], today]],
+                        value_input_option="USER_ENTERED"
+                    )
+                    message = "Marks updated successfully."
+                else:
+                    # New record for today's date.
+                    safe_append_row(
+                        marks_ws,
+                        [
+                            matched_student.get("Student ID", ""),
+                            matched_student.get("Student Name", ""),
+                            marks_value,
+                            session["user"],
+                            today
+                        ],
+                        value_input_option="USER_ENTERED"
+                    )
+                    message = "Marks submitted successfully."
+            except Exception:
+                # The write genuinely failed even after retries — do NOT
+                # report success. The cache is invalidated so the next
+                # load re-reads the real sheet state instead of trusting
+                # anything we assumed here.
+                invalidate_marks_cache()
+                flash(
+                    "Could not save marks right now (connection issue "
+                    "with Google Sheets). Please try again in a moment.",
+                    "error"
                 )
-                message = "Marks updated successfully."
-            else:
-                # New record for today's date.
-                marks_ws.append_row(
-                    [
-                        matched_student.get("Student ID", ""),
-                        matched_student.get("Student Name", ""),
-                        marks_value,
-                        session["user"],
-                        today
-                    ],
-                    value_input_option="USER_ENTERED"
-                )
-                message = "Marks submitted successfully."
+                return redirect(url_for_dashboard(
+                    sid[-4:] if len(sid) >= 4 else sid
+                ))
 
             invalidate_marks_cache()
 
         flash(message, "success")
-        return redirect(url_for_dashboard(
-            sid[-4:] if len(sid) >= 4 else sid
-        ))
+
+        # Clear the search after a successful save so the previously
+        # searched student's ID/details don't linger on the page.
+        return redirect("/dashboard")
 
     # ---------- TODAY'S STATISTICS ----------
     marks_today = [
@@ -479,7 +588,7 @@ def dashboard():
     ta_attendance = {}
 
     if role == "instructor":
-        attendance_records = ta_attendance_ws.get_all_records()
+        attendance_records = safe_get_all_records(ta_attendance_ws)
 
         ta_attendance = {
             name: "Absent"
@@ -538,7 +647,7 @@ def attendance():
     today = datetime.now().strftime("%Y-%m-%d")
 
     def load_today_attendance():
-        records = ta_attendance_ws.get_all_records()
+        records = safe_get_all_records(ta_attendance_ws)
 
         result = {name: "Absent" for name in ta_names}
 
@@ -556,9 +665,9 @@ def attendance():
 
         selected = set(request.form.getlist("ta_names"))
 
-        with write_lock:
+        with attendance_lock:
 
-            records = ta_attendance_ws.get_all_records()
+            records = safe_get_all_records(ta_attendance_ws)
             existing_rows = {}
 
             for row_number, record in enumerate(records, start=2):
@@ -568,27 +677,47 @@ def attendance():
                 if date == today and name in ta_names:
                     existing_rows[name] = row_number
 
+            # Batch every TA's row into as few Sheets API calls as
+            # possible instead of one call per TA (which, with 15 TAs,
+            # meant up to 15 round-trips per submission before this).
+            batch_updates = []
+            new_rows = []
+
             for name in ta_names:
 
                 is_present = name in selected
                 status_bit = status_to_bit(is_present)
 
                 if name in existing_rows:
-
                     row = existing_rows[name]
-
-                    ta_attendance_ws.update(
-                        f"A{row}:C{row}",
-                        [[name, today, status_bit]],
-                        value_input_option="USER_ENTERED"
-                    )
-
+                    batch_updates.append({
+                        "range": f"A{row}:C{row}",
+                        "values": [[name, today, status_bit]]
+                    })
                 else:
+                    new_rows.append([name, today, status_bit])
 
-                    ta_attendance_ws.append_row(
-                        [name, today, status_bit],
+            try:
+                if batch_updates:
+                    safe_batch_update(
+                        ta_attendance_ws,
+                        batch_updates,
                         value_input_option="USER_ENTERED"
                     )
+
+                if new_rows:
+                    safe_append_rows(
+                        ta_attendance_ws,
+                        new_rows,
+                        value_input_option="USER_ENTERED"
+                    )
+            except Exception:
+                flash(
+                    "Could not save attendance right now (connection "
+                    "issue with Google Sheets). Please try again.",
+                    "error"
+                )
+                return redirect("/dashboard")
 
         flash("TA attendance saved successfully.", "success")
         return redirect("/dashboard")
