@@ -70,11 +70,12 @@
             <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
 
             <label for="marks_{{ loop.index }}">Change marks</label>
-            <input type="number"
-                   id="marks_{{ loop.index }}"
-                   name="marks"
-                   value="{{ s.existing_marks }}"
-                   required>
+            <select id="marks_{{ loop.index }}" name="marks" required>
+              <option value="" {% if s.existing_marks not in [0, 2, 5, "0", "2", "5"] %}selected{% endif %} disabled>Select marks</option>
+              <option value="0" {% if s.existing_marks in [0, "0"] %}selected{% endif %}>0</option>
+              <option value="2" {% if s.existing_marks in [2, "2"] %}selected{% endif %}>2</option>
+              <option value="5" {% if s.existing_marks in [5, "5"] %}selected{% endif %}>5</option>
+            </select>
 
             <button type="submit">Update marks</button>
           </form>
@@ -90,11 +91,12 @@
             <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
 
             <label for="marks_{{ loop.index }}">Marks</label>
-            <input type="number"
-                   id="marks_{{ loop.index }}"
-                   name="marks"
-                   placeholder="Enter marks"
-                   required>
+            <select id="marks_{{ loop.index }}" name="marks" required>
+              <option value="" selected disabled>Select marks</option>
+              <option value="0">0</option>
+              <option value="2">2</option>
+              <option value="5">5</option>
+            </select>
 
             <button type="submit">Save marks</button>
           </form>
