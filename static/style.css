@@ -536,6 +536,57 @@ button:active, .btn:active { transform: scale(0.98); }
 .roll-row:has(input:checked) .status-tag::before { content: "present"; }
 .roll-row:not(:has(input:checked)) .status-tag::before { content: "absent"; }
 
+/* ---------- Marks button-group (0 / 2 / 5) ---------- */
+.marks-btn-group {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.marks-btn-input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.marks-btn-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 13px 0;
+  min-height: 46px;
+  border-radius: 12px;
+  border: 2px solid var(--line-strong);
+  background: #fbfbff;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--ink-text);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+.marks-btn-label:hover {
+  border-color: var(--sky);
+  transform: translateY(-1px);
+}
+
+.marks-btn-input:checked + .marks-btn-label {
+  color: #ffffff;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--indigo) 0%, var(--sky) 55%, var(--teal) 100%);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.32);
+}
+
+.marks-btn-input:focus-visible + .marks-btn-label {
+  outline: 3px solid var(--sky);
+  outline-offset: 2px;
+}
+
 /* ---------- Flash alerts ---------- */
 .alert {
   padding: 14px 16px;
