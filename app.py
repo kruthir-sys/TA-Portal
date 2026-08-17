@@ -478,6 +478,17 @@ def dashboard():
                 sid[-4:] if len(sid) >= 4 else sid
             ))
 
+        ALLOWED_MARKS = (0, 2, 5)
+        if marks_value not in ALLOWED_MARKS:
+            flash(
+                "Marks must be one of: " +
+                ", ".join(str(m) for m in ALLOWED_MARKS) + ".",
+                "error"
+            )
+            return redirect(url_for_dashboard(
+                sid[-4:] if len(sid) >= 4 else sid
+            ))
+
         with marks_lock:
             latest_marks = safe_get_all_records(marks_ws)
 
