@@ -69,13 +69,19 @@
           <form method="POST" style="margin-top:14px;">
             <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
 
-            <label for="marks_{{ loop.index }}">Change marks</label>
-            <select id="marks_{{ loop.index }}" name="marks" required>
-              <option value="" {% if s.existing_marks not in [0, 2, 5, "0", "2", "5"] %}selected{% endif %} disabled>Select marks</option>
-              <option value="0" {% if s.existing_marks in [0, "0"] %}selected{% endif %}>0</option>
-              <option value="2" {% if s.existing_marks in [2, "2"] %}selected{% endif %}>2</option>
-              <option value="5" {% if s.existing_marks in [5, "5"] %}selected{% endif %}>5</option>
-            </select>
+            <label>Change marks</label>
+            <div class="marks-btn-group">
+              {% for m in [0, 2, 5] %}
+              <input type="radio"
+                     class="marks-btn-input"
+                     id="marks_edit_{{ m }}_{{ s.Student_ID }}"
+                     name="marks"
+                     value="{{ m }}"
+                     {% if s.existing_marks in [m, m|string] %}checked{% endif %}
+                     required>
+              <label class="marks-btn-label" for="marks_edit_{{ m }}_{{ s.Student_ID }}">{{ m }}</label>
+              {% endfor %}
+            </div>
 
             <button type="submit">Update marks</button>
           </form>
@@ -90,13 +96,18 @@
           <form method="POST" style="margin-top:14px;">
             <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
 
-            <label for="marks_{{ loop.index }}">Marks</label>
-            <select id="marks_{{ loop.index }}" name="marks" required>
-              <option value="" selected disabled>Select marks</option>
-              <option value="0">0</option>
-              <option value="2">2</option>
-              <option value="5">5</option>
-            </select>
+            <label>Marks</label>
+            <div class="marks-btn-group">
+              {% for m in [0, 2, 5] %}
+              <input type="radio"
+                     class="marks-btn-input"
+                     id="marks_new_{{ m }}_{{ s.Student_ID }}"
+                     name="marks"
+                     value="{{ m }}"
+                     required>
+              <label class="marks-btn-label" for="marks_new_{{ m }}_{{ s.Student_ID }}">{{ m }}</label>
+              {% endfor %}
+            </div>
 
             <button type="submit">Save marks</button>
           </form>
