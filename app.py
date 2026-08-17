@@ -293,6 +293,29 @@ def bit_to_status(raw_value):
     return "Absent"
 
 
+def ta_present_today(ta_name, today):
+    """True if this TA was marked Present in at least one session
+    (1, 2, or 3) today. Instructors are never gated by this check."""
+    ta_name = str(ta_name).strip()
+    if not ta_name:
+        return False
+
+    records = safe_get_all_records(ta_attendance_ws)
+
+    for record in records:
+        record_name = str(record.get("TA_Name", "")).strip()
+        record_date = str(record.get("Date", "")).strip()
+
+        if (
+            record_name == ta_name
+            and record_date == today
+            and bit_to_status(record.get("Status", "")) == "Present"
+        ):
+            return True
+
+    return False
+
+
 def find_student(students, search_value):
     search_value = normalize_student_id(search_value)
 
@@ -440,6 +463,18 @@ def dashboard():
 
     # ---------- SAVE / UPDATE MARKS ----------
     if request.method == "POST":
+
+        # A TA must be marked present (any session) today before they
+        # can grade students. Instructors are never gated by this.
+        if role == "ta" and not ta_present_today(session["user"], today):
+            flash(
+                "You must be marked present for today's session before "
+                "you can grade students. Ask your instructor to mark "
+                "your attendance.",
+                "error"
+            )
+            return redirect(url_for_dashboard(search_query))
+
         submitted_id = str(
             request.form.get("student_id", "")
         ).strip()
@@ -595,14 +630,17 @@ def dashboard():
         if str(mark.get("TA", "")).strip() not in ta_counts
     )
 
-    # ---------- TODAY'S TA ATTENDANCE ----------
-    ta_attendance = {}
+    # ---------- TODAY'S TA ATTENDANCE (grouped by session) ----------
+    # session_attendance: {"1": [names present], "2": [...], "3": [...]}
+    session_attendance = {"1": [], "2": [], "3": []}
 
     if role == "instructor":
         attendance_records = safe_get_all_records(ta_attendance_ws)
 
-        ta_attendance = {
-            name: "Absent"
+        # Track status per (name, session) first so we render TAs in a
+        # stable order (ta_names order) rather than sheet row order.
+        per_ta_session_status = {
+            name: {"1": "Absent", "2": "Absent", "3": "Absent"}
             for name in ta_names
         }
 
@@ -613,11 +651,31 @@ def dashboard():
             date = str(
                 record.get("Date", "")
             ).strip()
+            session_no = str(
+                record.get("Session", "1")
+            ).strip() or "1"
 
-            if date == today and ta_name in ta_attendance:
-                ta_attendance[ta_name] = bit_to_status(
+            if (
+                date == today
+                and ta_name in per_ta_session_status
+                and session_no in ("1", "2", "3")
+            ):
+                per_ta_session_status[ta_name][session_no] = bit_to_status(
                     record.get("Status", "")
                 )
+
+        for name in ta_names:
+            for session_no in ("1", "2", "3"):
+                if per_ta_session_status[name][session_no] == "Present":
+                    session_attendance[session_no].append(name)
+
+    # Whether the logged-in TA is cleared to grade today (instructors
+    # are always cleared). Computed once per page load and reused for
+    # every search result row in the template.
+    ta_can_grade = (
+        role == "instructor"
+        or ta_present_today(session["user"], today)
+    )
 
     return render_template(
         "dashboard.html",
@@ -629,7 +687,8 @@ def dashboard():
         graded_by_ta=graded_by_ta,
         graded_by_instructor=graded_by_instructor,
         ta_counts=ta_counts,
-        ta_attendance=ta_attendance,
+        session_attendance=session_attendance,
+        ta_can_grade=ta_can_grade,
         today=today
     )
 
@@ -657,7 +716,14 @@ def attendance():
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    def load_today_attendance():
+    VALID_SESSIONS = ("1", "2", "3")
+
+    def current_session():
+        # Works for both GET (query string) and POST (form field).
+        raw = request.values.get("session", "1").strip()
+        return raw if raw in VALID_SESSIONS else "1"
+
+    def load_today_attendance(session_no):
         records = safe_get_all_records(ta_attendance_ws)
 
         result = {name: "Absent" for name in ta_names}
@@ -665,15 +731,17 @@ def attendance():
         for record in records:
             name = str(record.get("TA_Name", "")).strip()
             date = str(record.get("Date", "")).strip()
+            rec_session = str(record.get("Session", "1")).strip() or "1"
             status = record.get("Status", "")
 
-            if date == today and name in result:
+            if date == today and rec_session == session_no and name in result:
                 result[name] = bit_to_status(status)
 
         return result
 
     if request.method == "POST":
 
+        session_no = current_session()
         selected = set(request.form.getlist("ta_names"))
 
         with attendance_lock:
@@ -684,8 +752,15 @@ def attendance():
             for row_number, record in enumerate(records, start=2):
                 name = str(record.get("TA_Name", "")).strip()
                 date = str(record.get("Date", "")).strip()
+                rec_session = str(
+                    record.get("Session", "1")
+                ).strip() or "1"
 
-                if date == today and name in ta_names:
+                if (
+                    date == today
+                    and rec_session == session_no
+                    and name in ta_names
+                ):
                     existing_rows[name] = row_number
 
             # Batch every TA's row into as few Sheets API calls as
@@ -702,11 +777,11 @@ def attendance():
                 if name in existing_rows:
                     row = existing_rows[name]
                     batch_updates.append({
-                        "range": f"A{row}:C{row}",
-                        "values": [[name, today, status_bit]]
+                        "range": f"A{row}:D{row}",
+                        "values": [[name, today, session_no, status_bit]]
                     })
                 else:
-                    new_rows.append([name, today, status_bit])
+                    new_rows.append([name, today, session_no, status_bit])
 
             try:
                 if batch_updates:
@@ -728,16 +803,19 @@ def attendance():
                     "issue with Google Sheets). Please try again.",
                     "error"
                 )
-                return redirect("/dashboard")
+                return redirect(f"/attendance?session={session_no}")
 
-        flash("TA attendance saved successfully.", "success")
-        return redirect("/dashboard")
+        flash(f"Session {session_no} attendance saved successfully.", "success")
+        return redirect(f"/attendance?session={session_no}")
+
+    session_no = current_session()
 
     return render_template(
         "attendance.html",
         tas=tas,
         today=today,
-        ta_attendance=load_today_attendance()
+        session_no=session_no,
+        ta_attendance=load_today_attendance(session_no)
     )
 
 
