@@ -27,7 +27,16 @@
 
   <div class="card">
     <div class="section-label">✅ Today's roll call — {{ today }}</div>
+
+    <div class="session-tabs">
+      {% for s in ["1", "2", "3"] %}
+      <a class="session-tab {{ 'active' if session_no == s else '' }}"
+         href="/attendance?session={{ s }}">Session {{ s }}</a>
+      {% endfor %}
+    </div>
+
     <form method="POST">
+      <input type="hidden" name="session" value="{{ session_no }}">
       <ul class="roll-list">
         {% for ta in tas %}
         <li class="roll-row">
@@ -48,7 +57,7 @@
         </li>
         {% endfor %}
       </ul>
-      <button type="submit">Save attendance</button>
+      <button type="submit">Save Session {{ session_no }} attendance</button>
     </form>
     <a class="back-link" href="/dashboard">← Back to dashboard</a>
   </div>
