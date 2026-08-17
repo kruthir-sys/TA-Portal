@@ -536,6 +536,107 @@ button:active, .btn:active { transform: scale(0.98); }
 .roll-row:has(input:checked) .status-tag::before { content: "present"; }
 .roll-row:not(:has(input:checked)) .status-tag::before { content: "absent"; }
 
+/* ---------- Session tabs (attendance marking) ---------- */
+.session-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.session-tab {
+  flex: 1;
+  text-align: center;
+  padding: 11px 0;
+  border-radius: 12px;
+  border: 2px solid var(--line-strong);
+  background: #fbfbff;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--ink-text);
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.session-tab:hover {
+  border-color: var(--sky);
+  transform: translateY(-1px);
+}
+
+.session-tab.active {
+  color: #ffffff;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--indigo) 0%, var(--sky) 55%, var(--teal) 100%);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.32);
+}
+
+/* ---------- Session attendance summary (dashboard) ---------- */
+.session-attendance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.session-block {
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  padding: 14px 14px 12px;
+  background: linear-gradient(120deg, #eff6ff, #ecfeff);
+}
+
+.session-block-title {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--indigo-dark);
+  margin-bottom: 10px;
+}
+
+.present-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.present-list li {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink-text);
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.present-list li::before {
+  content: "✓ ";
+  color: var(--moss);
+  font-weight: 700;
+}
+
+.session-block-count {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--moss);
+}
+
+.session-empty {
+  font-size: 0.82rem;
+  padding: 10px 12px;
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .session-attendance-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---------- Marks button-group (0 / 2 / 5) ---------- */
 .marks-btn-group {
   display: flex;
