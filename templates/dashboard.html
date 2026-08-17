@@ -93,6 +93,7 @@
 
         {% else %}
 
+          {% if ta_can_grade %}
           <form method="POST" style="margin-top:14px;">
             <input type="hidden" name="student_id" value="{{ s.Student_ID }}">
 
@@ -111,6 +112,11 @@
 
             <button type="submit">Save marks</button>
           </form>
+          {% else %}
+          <div class="empty-note" style="margin-top:12px;">
+            You need to be marked present for today before you can grade students. Ask your instructor to mark your attendance.
+          </div>
+          {% endif %}
 
         {% endif %}
       </div>
@@ -153,20 +159,24 @@
   {% if role == "instructor" %}
   <div class="card">
     <div class="section-label">✅ TA attendance — {{ today }}</div>
-    <ul class="ta-ledger">
-      {% for ta, status in ta_attendance.items() %}
-      <li>
-        <span>{{ ta }}</span>
-        <span class="count">
-          {% if status == "Present" %}
-            <span style="color:#16803c;font-weight:700;">✓ Present</span>
-          {% else %}
-            <span style="color:#b42318;font-weight:700;">✗ Absent</span>
-          {% endif %}
-        </span>
-      </li>
+    <div class="session-attendance-grid">
+      {% for s in ["1", "2", "3"] %}
+      <div class="session-block">
+        <div class="session-block-title">Session {{ s }}</div>
+        {% set present_list = session_attendance.get(s, []) %}
+        {% if present_list %}
+        <ul class="present-list">
+          {% for name in present_list %}
+          <li>{{ name }}</li>
+          {% endfor %}
+        </ul>
+        <div class="session-block-count">{{ present_list|length }} present</div>
+        {% else %}
+        <p class="empty-note session-empty">No one marked present yet</p>
+        {% endif %}
+      </div>
       {% endfor %}
-    </ul>
+    </div>
   </div>
 
   <div class="link-row">
